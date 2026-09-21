@@ -249,9 +249,9 @@ class DecisionModel(nn.Module):
 
     def _branch_rows_from_prefix(self, enc, cache):
         """Hybrid serving: replicate the cached state once per question and run the branches as causal rows (exactly the
-        forward_rows_batch layout, minus the recomputed state). The cache is consumed (replicated, then extended)."""
+        forward_rows_batch layout, minus the recomputed state). Works on a copy: the caller's prefix stays pristine."""
         S, Sp, rows = rows_of(enc); Q = len(rows)
-        cache.reorder_cache(torch.zeros(Q, dtype=torch.long, device=self.device))
+        cache = copy.deepcopy(cache); cache.reorder_cache(torch.zeros(Q, dtype=torch.long, device=self.device))
         ids, pos, att = self._pad_rows([(r["ids"], r["pos"]) for r in rows])
         att = torch.cat([torch.ones((Q, len(S)), dtype=torch.long, device=self.device), att], 1)   # the cached state tokens are all real
         h = self.lm(input_ids=ids, position_ids=pos, attention_mask=att, past_key_values=cache, use_cache=True).last_hidden_state.float()
@@ -273,9 +273,9 @@ class DecisionModel(nn.Module):
         Ls = enc["seg"].count(0)
         if self.hybrid:
             # recurrent layers cannot be cropped back to the state, so a hybrid miss is a state pass (kept as the prefix)
-            # plus the branch rows run on a copy of that cache
+            # plus the branch rows
             Ls, cache, h_state = self.prefix(enc)
-            return self._branch_rows_from_prefix(enc, copy.deepcopy(cache)), (Ls, cache, h_state)
+            return self._branch_rows_from_prefix(enc, cache), (Ls, cache, h_state)
         ids = torch.tensor([enc["ids"]], device=self.device); pos = torch.tensor([enc["pos"]], device=self.device)
         dt = next(self.lm.parameters()).dtype
         mask = branch_mask_batch([enc["seg"]], self.device, dtype=dt, opts=[enc["opt"]] if enc.get("option_isolation") else None)
@@ -291,7 +291,7 @@ class DecisionModel(nn.Module):
         Ls, cache, h_state = prefix
         if enc["seg"].count(0) != Ls: raise ValueError("prefix does not match this record's state")
         if self.hybrid:
-            return self._branch_rows_from_prefix(enc, copy.deepcopy(cache))   # the stored prefix stays pristine
+            return self._branch_rows_from_prefix(enc, cache)
         ids = torch.tensor([enc["ids"][Ls:]], device=self.device); pos = torch.tensor([enc["pos"][Ls:]], device=self.device)
         dt = next(self.lm.parameters()).dtype
         mask = branch_mask_batch([enc["seg"]], self.device, dtype=dt, opts=[enc["opt"]] if enc.get("option_isolation") else None)[:, :, Ls:, :]
