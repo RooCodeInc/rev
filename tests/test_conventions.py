@@ -19,8 +19,8 @@ RULES = [
      r"environ(\.get)?\(?\[?\s*\"KEV_(DTYPE|MERGE|ATTN|LORA_SCALE|TEMPERATURE)\"", {"kev/checkpoint.py"}),
     ("option keys come from kev.api.question_keys",
      r"\[\s*\"false\"\s*,\s*\"true\"\s*\]|\[str\(i\) for i in range\(len\(", {"kev/api.py", "tests/test_unit.py"}),   # the unit test pins the contract
-    ("the training context is kev.model.MAX_STATE/MAX_BRANCH/MAX_PACKED and kev.model.fits",
-     r"(?<![\w.])(>|<=|>=|<)\s*2048\b|\b2048\s*(<|>)|max_branch\s*=\s*\d{3,}", {"kev/model.py"}),
+    ("the training context is kev.model.MAX_STATE/MAX_BRANCH/MAX_PACKED (kev.suite.CONTEXT in manifests) and kev.model.fits",
+     r"(?<![\w.])(>|<=|>=|<)\s*2048\b|\b2048\s*(<|>)|max_(branch|state|packed)\"?\s*[=:]\s*\d{3,}", {"kev/model.py"}),
 ]
 
 
