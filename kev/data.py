@@ -40,10 +40,10 @@ class Source(random.Random):
         self.origins = []
 
 
-def _dataset(repo, split, rng):
-    """repo may be 'owner/name' or 'owner/name:config'; rng is the Source, which carries the revision to pin."""
+def _dataset(repo, split, src):
+    """repo may be 'owner/name' or 'owner/name:config'; the Source carries the revision to pin."""
     name, _, config = repo.partition(":")
-    return load_dataset(name, config or None, split=split, revision=rng.revision or PARQUET_BRANCH.get(name))
+    return load_dataset(name, config or None, split=split, revision=src.revision or PARQUET_BRANCH.get(name))
 
 NONE = "None of the above"
 # "None of the above" options must appear both as the correct answer and as a wrong alternative, with varied
@@ -98,7 +98,7 @@ def _sample(ds, n, src):
 
 
 def _banking(split, n, rng):
-    ds = _dataset("legacy-datasets/banking77", split=split, rng=rng)
+    ds = _dataset("legacy-datasets/banking77", split=split, src=rng)
     names = ds.features["label"].names
     out = []
     for ex in _sample(ds, n, rng):
@@ -109,7 +109,7 @@ def _banking(split, n, rng):
 
 
 def _boolq(split, n, rng):
-    ds = _dataset("google/boolq", split=split, rng=rng)
+    ds = _dataset("google/boolq", split=split, src=rng)
     out = []
     for ex in _sample(ds, n, rng):
         q = {"type": "noul", "instructions": _instr(ex["question"].strip().rstrip("?") + "?", rng), "label": bool(ex["answer"]), "src": "boolq"}
@@ -119,7 +119,7 @@ def _boolq(split, n, rng):
 
 
 def _agnews(split, n, rng):
-    ds = _dataset("fancyzhx/ag_news", split=split, rng=rng)
+    ds = _dataset("fancyzhx/ag_news", split=split, src=rng)
     keys = list(AG)
     out = []
     for ex in _sample(ds, n, rng):
@@ -132,19 +132,19 @@ def _agnews(split, n, rng):
 
 
 def _mnli(split, n, rng):
-    ds = _dataset("nyu-mll/multi_nli", split=split, rng=rng)
+    ds = _dataset("nyu-mll/multi_nli", split=split, src=rng)
     keys = list(MNLI)
     return [{"state": _wrap_state(ex["premise"], rng), "questions": {"relation": {"type": "choice", "instructions": _instr(f'Hypothesis: "{ex["hypothesis"]}" How does it relate to the premise?', rng), "criteria": {k: _desc(v, rng) for k, v in MNLI.items()}, "label": keys[ex["label"]], "src": "mnli"}}}
             for ex in _sample(ds, n, rng) if ex["label"] >= 0]
 
 
 def _sst5(split, n, rng):
-    ds = _dataset("SetFit/sst5", split=split, rng=rng)
+    ds = _dataset("SetFit/sst5", split=split, src=rng)
     return [{"state": _wrap_state(ex["text"], rng), "questions": {"sentiment": {"type": "score", "instructions": _instr("What is the sentiment of this review sentence?", rng), "criteria": list(SST5), "label": ex["label"], "src": "sst5"}}} for ex in _sample(ds, n, rng)]
 
 
 def _yelp(split, n, rng):
-    ds = _dataset("Yelp/yelp_review_full", split=split, rng=rng)
+    ds = _dataset("Yelp/yelp_review_full", split=split, src=rng)
     out = []
     for ex in _sample(ds, n, rng):
         text = " ".join(ex["text"].split()[:220])
@@ -168,53 +168,53 @@ AMAZON = ["1 star: very negative", "2 stars: negative", "3 stars: mixed", "4 sta
 
 
 def _trec(split, n, rng):
-    ds = _dataset("CogComp/trec", split=split, rng=rng)
+    ds = _dataset("CogComp/trec", split=split, src=rng)
     keys = list(TREC)
     return [{"state": _wrap_state(ex["text"], rng), "questions": {"answer_type": {"type": "choice", "instructions": "What kind of answer does this question ask for?",
              "criteria": dict(TREC), "label": keys[ex["coarse_label"]], "src": "trec"}}} for ex in _sample(ds, n, rng)]
 
 
 def _dbpedia(split, n, rng):
-    ds = _dataset("fancyzhx/dbpedia_14", split=split, rng=rng)
+    ds = _dataset("fancyzhx/dbpedia_14", split=split, src=rng)
     names = [x.lower().replace(" ", "_") for x in ds.features["label"].names]
     return [{"state": _wrap_state(" ".join(ex["content"].split()[:200]), rng), "questions": {"category": {"type": "choice", "instructions": "Which category does the subject of this encyclopedia text belong to?",
              "criteria": {k: None for k in names}, "label": names[ex["label"]], "src": "dbpedia14"}}} for ex in _sample(ds, n, rng)]
 
 
 def _emotion(split, n, rng):
-    ds = _dataset("dair-ai/emotion:split", split=split, rng=rng)
+    ds = _dataset("dair-ai/emotion:split", split=split, src=rng)
     keys = list(EMOTION)
     return [{"state": ex["text"], "questions": {"emotion": {"type": "choice", "instructions": "Which emotion does the writer express?",
              "criteria": dict(EMOTION), "label": keys[ex["label"]], "src": "emotion"}}} for ex in _sample(ds, n, rng)]
 
 
 def _imdb(split, n, rng):
-    ds = _dataset("stanfordnlp/imdb", split=split, rng=rng)
+    ds = _dataset("stanfordnlp/imdb", split=split, src=rng)
     return [{"state": _wrap_state(" ".join(ex["text"].replace("<br />", " ").split()[:220]), rng), "questions": {"positive": {"type": "noul", "instructions": "Is this movie review positive?",
              "criteria": {"true": "The reviewer liked the film overall", "false": "The reviewer disliked the film overall"}, "label": ex["label"] == 1, "src": "imdb"}}} for ex in _sample(ds, n, rng)]
 
 
 def _amazon(split, n, rng):
-    ds = _dataset("SetFit/amazon_reviews_multi_en", split=split, rng=rng)
+    ds = _dataset("SetFit/amazon_reviews_multi_en", split=split, src=rng)
     return [{"state": _wrap_state(" ".join(ex["text"].split()[:220]), rng), "questions": {"stars": {"type": "score", "instructions": "How many stars did this product reviewer give?",
              "criteria": list(AMAZON), "label": ex["label"], "src": "amazon"}}} for ex in _sample(ds, n, rng)]
 
 
 def _qnli(split, n, rng):
-    ds = _dataset("nyu-mll/glue:qnli", split=split, rng=rng)
+    ds = _dataset("nyu-mll/glue:qnli", split=split, src=rng)
     return [{"state": _wrap_state(ex["sentence"], rng), "questions": {"answers": {"type": "noul", "instructions": f'Does the sentence contain the answer to this question: "{ex["question"]}"',
              "label": ex["label"] == 0, "src": "qnli"}}} for ex in _sample(ds, n, rng)]
 
 
 def _offensive(split, n, rng):
-    ds = _dataset("cardiffnlp/tweet_eval:offensive", split=split, rng=rng)
+    ds = _dataset("cardiffnlp/tweet_eval:offensive", split=split, src=rng)
     return [{"state": ex["text"], "questions": {"offensive": {"type": "noul", "instructions": "Is this post offensive?",
              "criteria": {"true": "Contains insults, threats, profanity directed at someone, or hateful content", "false": "Not offensive"},
              "label": ex["label"] == 1, "src": "tweet_offensive"}}} for ex in _sample(ds, n, rng)]
 
 
 def _mmlu(split, n, rng):
-    ds = _dataset("cais/mmlu:all", split=split, rng=rng)
+    ds = _dataset("cais/mmlu:all", split=split, src=rng)
     out = []
     for ex in _sample(ds, n, rng):
         keys = ["a", "b", "c", "d"]
@@ -225,14 +225,14 @@ def _mmlu(split, n, rng):
 
 
 def _paws(split, n, rng):
-    ds = _dataset("google-research-datasets/paws:labeled_final", split=split, rng=rng)
+    ds = _dataset("google-research-datasets/paws:labeled_final", split=split, src=rng)
     return [{"state": _wrap_state(ex["sentence1"], rng), "questions": {"paraphrase": {"type": "noul", "instructions": f'Does this sentence mean the same thing: "{ex["sentence2"]}"',
              "criteria": {"true": "Same meaning, possibly reworded", "false": "Different meaning, even if most words match"}, "label": ex["label"] == 1, "src": "paws"}}}
             for ex in _sample(ds, n, rng)]
 
 
 def _sciq(split, n, rng):
-    ds = _dataset("allenai/sciq", split=split, rng=rng)
+    ds = _dataset("allenai/sciq", split=split, src=rng)
     out = []
     for ex in _sample(ds, n, rng):
         options = [ex["correct_answer"], ex["distractor1"], ex["distractor2"], ex["distractor3"]]
@@ -256,17 +256,17 @@ def _mcq(ex_q, labels, texts, answer_label, src, rng, state_extra=None):
 
 
 def _arc(split, n, rng):
-    ds = _dataset("allenai/ai2_arc:ARC-Challenge", split=split, rng=rng)
+    ds = _dataset("allenai/ai2_arc:ARC-Challenge", split=split, src=rng)
     return [_mcq(ex["question"], list(ex["choices"]["label"]), list(ex["choices"]["text"]), ex["answerKey"], "arc", rng) for ex in _sample(ds, n, rng)]
 
 
 def _openbookqa(split, n, rng):
-    ds = _dataset("allenai/openbookqa:main", split=split, rng=rng)
+    ds = _dataset("allenai/openbookqa:main", split=split, src=rng)
     return [_mcq(ex["question_stem"], list(ex["choices"]["label"]), list(ex["choices"]["text"]), ex["answerKey"], "openbookqa", rng) for ex in _sample(ds, n, rng)]
 
 
 def _csqa(split, n, rng):
-    ds = _dataset("tau/commonsense_qa", split=split, rng=rng)
+    ds = _dataset("tau/commonsense_qa", split=split, src=rng)
     return [_mcq(ex["question"], list(ex["choices"]["label"]), list(ex["choices"]["text"]), ex["answerKey"], "csqa", rng) for ex in _sample(ds, n, rng) if ex["answerKey"]]
 
 

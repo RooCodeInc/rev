@@ -1,6 +1,7 @@
 """Numerical parity of the model's serving paths, on real weights: merged vs unmerged LoRA, prefix cache vs full pass,
 shape-bucket padding, row form vs packed mask, hybrid isolation, and the --init_from warm start end to end.
-Needs the smoke checkpoint (runs/smoke-hl/00-trial-0/checkpoint) and downloads Qwen/Qwen2.5-0.5B; not run in CI.
+Needs the smoke checkpoint (runs/smoke-hl/00-trial-0/checkpoint) and downloads Qwen/Qwen2.5-0.5B (the hybrid test also
+Qwen/Qwen3.5-0.8B-Base); not run in CI.
 Run: uv run --extra serve python -m pytest tests/test_model.py -q
 """
 import os
@@ -21,9 +22,8 @@ def test_merged_load_matches_unmerged_exactly_in_fp32(smoke_run):
     from kev.checkpoint import LoadOptions, load
     from kev.data import materialize
     from kev.suite import load_split
-    run = smoke_run
     recs = [materialize(r) for r in load_split("evals/smoke-v1", "development")[:3]]
-    tok, a = load(run, "cpu", LoadOptions(merge=False)); _, b = load(run, "cpu", LoadOptions(merge=True))
+    tok, a = load(smoke_run, "cpu", LoadOptions(merge=False)); _, b = load(smoke_run, "cpu", LoadOptions(merge=True))
     with torch.no_grad():
         for r in recs:
             pa, pb = torch.cat(a.probs(a.encode(tok, r))), torch.cat(b.probs(b.encode(tok, r)))
@@ -34,8 +34,7 @@ def test_prefix_cache_matches_full_pass(smoke_run):
     from kev.checkpoint import load
     from kev.data import materialize
     from kev.suite import load_split
-    run = smoke_run
-    tok, m = load(run, "cpu")
+    tok, m = load(smoke_run, "cpu")
     recs = [materialize(r) for r in load_split("evals/smoke-v1", "development")[:3]]
     for r in recs:
         enc = m.encode(tok, r); full = torch.cat(m.probs(enc))
@@ -54,8 +53,7 @@ def test_shape_bucket_padding_is_exact_in_fp32(smoke_run):
     from kev.checkpoint import load
     from kev.data import materialize
     from kev.suite import load_split
-    run = smoke_run
-    tok, m = load(run, "cpu")
+    tok, m = load(smoke_run, "cpu")
     recs = [materialize(r) for r in load_split("evals/smoke-v1", "development")[:3]]
     from kev.model import branch_mask_batch
     for r in recs:

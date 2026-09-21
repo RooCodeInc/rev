@@ -518,7 +518,6 @@ def test_gate_rejects_confident_transfer_failure():
     assert not result["checks"]["transfer_confident_errors_below_10pct"]
 
 def test_uneven_microbatches_have_equal_record_weight():
-    import torch
     from kev.train import accumulation_records
     x = torch.arange(10, dtype=torch.float32)
     gradients = []
@@ -550,7 +549,6 @@ def test_unpinned_base_requires_full_sha_in_trial():
         validated_trial({"base": "pinned", "base_revision": "b" * 40}, manifest)
 
 def test_none_pair_is_minimal_and_relabelled():
-    import random
     from kev.data import none_pair, materialize
     req = {"state": "The shoes are the wrong size.", "questions": {"reason": {"type": "choice", "instructions": "Why?",
            "criteria": {"size": "Wrong size", "damage": "Damaged", "color": "Wrong color"}, "label": "size", "src": "t"}}}
@@ -610,7 +608,6 @@ def test_top_bins_and_confidence_bias():
     assert abs(m["confidence_bias"] - ((0.99 + 0.99 + 0.6) / 3 - 2 / 3)) < 1e-9
 
 def test_anchor_loss_aligns_by_key_and_skips_changed_option_sets():
-    import torch
     from kev.train import anchor_loss
     q = {"keys": ["b", "a"]}
     z = torch.tensor([0.0, 0.0])

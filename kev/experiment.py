@@ -119,7 +119,8 @@ def study_lock():
         yield
 
 
-# research screening thresholds; gate_report's policy string is generated from them
+# research screening thresholds; gate_report's policy string is generated from them. The gate *names* ("..._over_5pp",
+# "..._at_least_70pct") are ledger keys and must be renamed by hand if a threshold changes.
 GATES = {"isolation_tolerance": 0.001, "task_accuracy_regression": 0.05, "variant_accuracy_regression": 0.05, "permutation_flip_increase": 0.05,
          "heldout_pairs_min": 0.7, "transfer_confident_errors_max": 0.1, "transfer_accuracy_regression": 0.02, "transfer_brier_increase": 0.02}
 

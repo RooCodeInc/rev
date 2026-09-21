@@ -2,8 +2,6 @@
 and the v3 suite builder's grouping (kev.study_v3). No weights, no network.
 Run: uv run python -m pytest tests/test_generators.py -q
 """
-import random
-
 import pytest
 
 from kev.contrastive import generate, paired_flip
