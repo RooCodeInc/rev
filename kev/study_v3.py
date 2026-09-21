@@ -7,7 +7,7 @@ from pathlib import Path
 
 from huggingface_hub import HfApi
 
-from kev.composition import DEV_SHAPES, TEST_SHAPES, TRAIN_SHAPES, canonical, check_group, generate as compose, sample_trees
+from kev.composition import DEV_SHAPES, HELD_OUT_KEYS, TEST_SHAPES, TRAIN_SHAPES, canonical, check_group, generate as compose, sample_trees
 from kev.contrastive import ORDINAL_FAMILIES, generate
 from kev.data import materialize
 from kev.model import fits, load_tokenizer

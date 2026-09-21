@@ -9,7 +9,7 @@ Batch size is small (variable-length records with custom masks) and gradients ar
 """
 import argparse, contextlib, json, math, random, resource, sys, time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 import torch
 import torch.nn.functional as F
@@ -83,15 +83,18 @@ def training_requests(a, tok, manifest, holdout):
     """The labelled requests one run trains on: the suite's training partition, records built from the public sources,
     or the user's own file (optionally with a replay sample from the suite); filtered to the training context, checked
     against the eval-only policy, then the ablation knobs (--train_sources, --public_frac, --synthetic_repeat)."""
-    own, replay = [], []
+    # the suite's rules (declared trainable sources, no held-out structures) apply to every record taken from it
     if a.data:
-        own = load_records(a.data)
+        reqs = load_records(a.data)
         if a.replay:
             pool = load_split(a.suite, "train"); replay = random.Random(f"replay:{a.seed}").sample(pool, min(a.replay, len(pool)))
-            print(f"replay: {len(replay)} of {len(pool)} suite training records mixed with {len(own)} from {a.data}", flush=True)
-        reqs = own + replay
+            validate_training(replay, manifest)
+            print(f"replay: {len(replay)} of {len(pool)} suite training records mixed with {len(reqs)} from {a.data}", flush=True)
+            reqs = reqs + replay
+    elif manifest:
+        reqs = load_split(a.suite, "train"); validate_training(reqs, manifest)
     else:
-        reqs = load_split(a.suite, "train") if manifest else build(a.n_per_source, "train", a.seed, exclude=holdout)
+        reqs = build(a.n_per_source, "train", a.seed, exclude=holdout)
     if not manifest or a.data:
         # frozen suites are filtered to the training context when they are frozen (kev.suite.select_unique); records built
         # on the fly here are not, so apply the same rule instead of letting the strict encoder abort the run (issue #5)
@@ -112,11 +115,6 @@ def training_requests(a, tok, manifest, holdout):
         if unknown: raise ValueError(f"--train_sources not in the training partition: {sorted(unknown)}")
         reqs = [r for r in reqs if r["_meta"]["source"] in wanted]
         print(f"ablation: training on {sorted(wanted)} -> {len(reqs)} records", flush=True)
-    if manifest:
-        # the suite's rules (declared trainable sources, no held-out structures) apply to every record that came from it
-        own_ids = {id(r) for r in own}
-        from_suite = [r for r in reqs if id(r) not in own_ids]
-        if from_suite: validate_training(from_suite, manifest)
     if a.public_frac < 1:
         mix_rng = random.Random(source_seed(a.seed, "public_frac"))
         public = [r for r in reqs if r["_meta"]["source"] not in SYNTHETIC_SOURCES]; synth = [r for r in reqs if r["_meta"]["source"] in SYNTHETIC_SOURCES]
@@ -130,21 +128,25 @@ def training_requests(a, tok, manifest, holdout):
     return reqs
 
 
-@dataclass
-class Batch:
-    """One micro-batch: the augmented, encoded variants of a chunk of requests plus the optional second-order copies."""
-    recs: list = field(default_factory=list)
-    encs: list = field(default_factory=list)
-    ids: list = field(default_factory=list)        # source request id per variant (anchor lookup)
-    sources: list = field(default_factory=list)    # source name per variant (anchor filter)
-    perm_jobs: list = field(default_factory=list)  # (index into recs, encoding under another option order, perms)
-    tokens: int = 0
+@dataclass(eq=False)   # identity, so batch.index(v) finds this very variant
+class Variant:
+    """One encoded training example: an augmented copy of a source request, with the request's id and source kept for
+    the anchor lookup, and optionally the same record under a second option order for the permutation KL."""
+    rec: dict
+    enc: dict
+    request_id: str
+    source: str
+    permuted: tuple | None = None   # (encoding under the other order, perms from permuted_copy)
+
+    @property
+    def tokens(self):
+        return len(self.enc["ids"]) + (len(self.permuted[0]["ids"]) if self.permuted else 0)
 
 
 def encode_batch(model, tok, a, chunk, epoch):
-    """Augment (fresh permutation / none option / distractor per epoch), optionally add none-pair siblings and a
-    permuted copy for the KL term, and encode strictly."""
-    b = Batch()
+    """Augment each request (fresh permutation / none option / distractor per epoch), optionally add its none-pair
+    siblings and a permuted copy for the KL term, and encode strictly."""
+    out = []
     for req in chunk:
         item_rng = random.Random(source_seed(a.seed, f"{epoch}:{req['_meta']['id']}"))
         variants = [augment(req, item_rng, p_none=a.p_none, p_none_distract=a.p_none_distract, p_distract=a.p_distract)]
@@ -155,36 +157,37 @@ def encode_batch(model, tok, a, chunk, epoch):
             enc = model.encode(tok, rec, strict=True)
             if len(enc["ids"]) > MAX_PACKED:
                 raise ValueError(f"training request exceeds {MAX_PACKED} packed tokens")
-            b.recs.append(rec); b.encs.append(enc); b.ids.append(req["_meta"]["id"]); b.sources.append(req["_meta"]["source"]); b.tokens += len(enc["ids"])
+            out.append(Variant(rec, enc, req["_meta"]["id"], req["_meta"]["source"]))
         if a.perm_kl > 0 and item_rng.random() < a.perm_frac and any(q["qtype"] == "choice" and len(q["options"]) >= 3 for q in rec["questions"]):
-            rec2, perms = permuted_copy(rec, item_rng); enc2 = model.encode(tok, rec2, strict=True)
-            b.perm_jobs.append((len(b.recs) - 1, enc2, perms)); b.tokens += len(enc2["ids"])
-    return b
+            rec2, perms = permuted_copy(rec, item_rng)
+            out[-1].permuted = (model.encode(tok, rec2, strict=True), perms)
+    return out
 
 
-def batch_loss(model, a, b, dev, anchors, anchor_sources, autocast):
-    """Forward the batch and sum its terms: mean question loss per record, the anchor KL per anchored record, the
-    permutation KL per permuted record. Returns (loss, stats) with stats holding the running-average numerators."""
-    stats = Counter()
+def batch_loss(model, a, batch, dev, anchors, anchor_sources, autocast):
+    """Forward the variants and sum the loss terms: mean question loss per variant, the anchor KL per anchored variant,
+    the permutation KL per permuted variant. Returns (loss, terms) with the summed term values for logging."""
+    terms = Counter()
+    permuted = [v for v in batch if v.permuted]
     with autocast:
-        logits_b = model.forward_batch(b.encs)
-        logits2_b = model.forward_batch([e for _, e, _ in b.perm_jobs]) if b.perm_jobs else []
+        logits_b = model.forward_batch([v.enc for v in batch])
+        logits2_b = model.forward_batch([v.permuted[0] for v in permuted]) if permuted else []
     loss = 0.0
-    for logits, rec, rid, src in zip(logits_b, b.recs, b.ids, b.sources):
+    for v, logits in zip(batch, logits_b):
         ce = sum(question_loss(z.float(), q, dev, a.ord_w, a.label_smoothing, a.brier_w, a.focal_gamma)
-                 for z, q in zip(logits, rec["questions"])) / len(logits)
-        stats["ce"] += ce.item(); loss = loss + ce
-        if anchors and rid in anchors and (anchor_sources is None or src in anchor_sources):
-            terms = [t for t in (anchor_loss(z.float(), q, anchors[rid].get(q["qid"]), dev) for z, q in zip(logits, rec["questions"])) if t is not None]
-            if terms:
-                kl_a = sum(terms) / len(terms); loss = loss + a.anchor_w * kl_a; stats["anchor"] += kl_a.item(); stats["anchor_n"] += 1
-    for (ri, _, perms), logits2 in zip(b.perm_jobs, logits2_b):
-        terms = [permutation_kl(z1.float(), z2.float(), perm, dev) for z1, z2, perm in zip(logits_b[ri], logits2, perms) if perm is not None]
-        kl = sum(terms) / len(terms); loss = loss + a.perm_kl * kl; stats["kl"] += kl.item(); stats["kl_n"] += 1
+                 for z, q in zip(logits, v.rec["questions"])) / len(logits)
+        terms["ce"] += ce.item(); loss = loss + ce
+        if anchors and v.request_id in anchors and (anchor_sources is None or v.source in anchor_sources):
+            kls = [t for t in (anchor_loss(z.float(), q, anchors[v.request_id].get(q["qid"]), dev) for z, q in zip(logits, v.rec["questions"])) if t is not None]
+            if kls:
+                kl_a = sum(kls) / len(kls); loss = loss + a.anchor_w * kl_a; terms["anchor"] += kl_a.item(); terms["anchor_n"] += 1
+    for v, logits2 in zip(permuted, logits2_b):
+        logits = logits_b[batch.index(v)]
+        kls = [permutation_kl(z1.float(), z2.float(), perm, dev) for z1, z2, perm in zip(logits, logits2, v.permuted[1]) if perm is not None]
+        kl = sum(kls) / len(kls); loss = loss + a.perm_kl * kl; terms["kl"] += kl.item(); terms["kl_n"] += 1
     if not torch.isfinite(loss):
         raise ValueError("non-finite training loss")
-    stats["n"] += len(b.recs)
-    return loss, stats
+    return loss, terms
 
 
 # --- run --------------------------------------------------------------------------------------------------------------
@@ -317,12 +320,12 @@ def main():
         rng.shuffle(reqs)
         for mb in range(micro_per_epoch):
             chunk = reqs[mb * a.batch : (mb + 1) * a.batch]
-            b = encode_batch(model, tok, a, chunk, ep)
-            loss, stats = batch_loss(model, a, b, dev, anchors, anchor_sources, autocast)
+            batch = encode_batch(model, tok, a, chunk, ep)
+            loss, terms = batch_loss(model, a, batch, dev, anchors, anchor_sources, autocast)
             # weight by source records in the accumulation group so none-pair siblings do not inflate a record's share
-            group_records = accumulation_records(len(reqs), a.batch, a.accum, mb) * (len(b.recs) / len(chunk))
+            group_records = accumulation_records(len(reqs), a.batch, a.accum, mb) * (len(batch) / len(chunk))
             (loss / group_records).backward()
-            run += stats; seen += len(b.recs); tokens_seen += b.tokens
+            run += terms; run["n"] += len(batch); seen += len(batch); tokens_seen += sum(v.tokens for v in batch)
             peak_mem = max(peak_mem, allocated_bytes(dev))
             if (mb + 1) % a.accum == 0 or mb + 1 == micro_per_epoch:
                 torch.nn.utils.clip_grad_norm_(model.trainable_parameters(), 1.0)
