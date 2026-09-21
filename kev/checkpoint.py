@@ -57,14 +57,10 @@ class Meta:
 
     @classmethod
     def from_dict(cls, d):
-        known = {k: d[k] for k in cls.KNOWN if k in d}
-        known["lora"] = int(known.get("lora") or 0); known["head_dim"] = int(known.get("head_dim", 256))
-        known["option_isolation"] = bool(known.get("option_isolation", False)); known["special_embeddings"] = bool(known.get("special_embeddings", False))
-        known["temperature"] = float(known.get("temperature", 1.0)); known["holdout"] = list(known.get("holdout") or [])
-        return cls(**known, extra={k: v for k, v in d.items() if k not in cls.KNOWN})
+        return cls(**{k: d[k] for k in cls.KNOWN if k in d}, extra={k: v for k, v in d.items() if k not in cls.KNOWN})
 
     def to_dict(self):
-        return {**{k: getattr(self, k) for k in self.KNOWN}, **self.extra}
+        return {**self.extra, **{k: getattr(self, k) for k in self.KNOWN}}   # known fields win over a stray key in extra
 
 
 def read_meta(run):
