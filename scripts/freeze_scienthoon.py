@@ -14,6 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
+from kev.benchmark import labels
 from kev.suite import digest, record_digest, write_json
 
 QUESTIONS = {"choice": ("queue", "unknowable_none"), "score": ("priority", "org_rule"), "noul": ("angry", "text")}
@@ -47,9 +48,8 @@ def main():
         rec["_meta"]["row_sha256"] = record_digest({k: v for k, v in rec.items() if k != "_meta"}); records.append(rec)
         for qid, q in t["questions"].items():
             j = t["jev"][qid]
-            if q["type"] == "choice": keys = j["option_keys"]; label = keys.index(q["label"])
-            elif q["type"] == "score": keys = [str(i) for i in range(len(q["criteria"]))]; label = q["label"]
-            else: keys = ["false", "true"]; label = int(q["label"])
+            keys, label = labels(q)
+            if q["type"] == "choice": keys = j["option_keys"]; label = keys.index(q["label"])   # Jev's own option order for this ticket
             p = np.array(j["probs"], dtype=float)
             if q["type"] == "noul": p = np.array([p[j["option_keys"].index("no")], p[j["option_keys"].index("yes")]])   # theirs are [yes, no]; ours [false, true]
             total = float(p.sum()); p = p / total if total > 0 else np.ones(len(keys)) / len(keys)
