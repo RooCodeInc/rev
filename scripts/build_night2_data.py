@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from kev import contrastive                              # noqa: E402
 from kev.api import date_facts, question_keys, render    # noqa: E402
-from kev.suite import digest, load_split, write_json     # noqa: E402
+from kev.suite import digest, load_split, write_json, write_json     # noqa: E402
 from kev.transfer_v9 import unknowable                   # noqa: E402
 
 OUT = ROOT / "evals/night2"
@@ -117,7 +117,7 @@ def main():
     for name, recs in files.items():
         before = len(recs); recs = [r for r in recs if r["_meta"].get("text_sha256") not in dev]   # never train on an evaluation state
         body = "".join(json.dumps(r, ensure_ascii=False, default=str) + "\n" for r in recs)
-        (OUT / name).write_text(body)
+        (OUT / name).write_text(body, encoding="utf-8")
         manifest["files"][name] = {"records": len(recs), "dropped_eval_overlap": before - len(recs), "sha256": digest(OUT / name),
                                    "sources": sorted({r["_meta"]["source"] for r in recs})}
         print(name, manifest["files"][name])
