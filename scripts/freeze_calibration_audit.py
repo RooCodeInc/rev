@@ -43,17 +43,13 @@ def reserve_existing(evals):
     states, origins, files = set(), set(), {}
     for path in sorted(evals.rglob("*.jsonl")):
         files[str(path.relative_to(ROOT))] = digest(path)
-        with path.open() as stream:
-            for line in stream:
-                if not line.strip():
-                    continue
-                r = json.loads(line)
-                if "state" not in r or "questions" not in r:
-                    continue
-                states.add(state_fingerprint(r))
-                m = r.get("_meta", {})
-                if m.get("repo") and m.get("row") is not None:
-                    origins.add((m["repo"], m.get("split"), str(m["row"])))
+        for r in read_jsonl(path):
+            if "state" not in r or "questions" not in r:
+                continue
+            states.add(state_fingerprint(r))
+            m = r.get("_meta", {})
+            if m.get("repo") and m.get("row") is not None:
+                origins.add((m["repo"], m.get("split"), str(m["row"])))
     return states, origins, files
 
 

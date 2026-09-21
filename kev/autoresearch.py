@@ -311,7 +311,7 @@ def main():
         rows, inc, _, _ = refresh_leaderboard(); update_plan(plan_section()); print(f"{len(rows)} trials;", {b.split('/')[-1]: (i and round(i['transfer_acc'], 3)) for b, i in inc.items()})
     elif a.cmd == "propose":
         rows, inc, dv4, tv4 = refresh_leaderboard(); manifest = read_manifest(ROOT / SUITE)
-        write_json(a.out, propose(rows, a.base, a.n, a.seed, manifest, inc[a.base] and inc[a.base]["config"])); print(open(a.out).read())
+        write_json(a.out, propose(rows, a.base, a.n, a.seed, manifest, inc[a.base] and inc[a.base]["config"])); print(Path(a.out).read_text(encoding=ENCODING))
     else:
         seeds = [int(x) for x in a.seeds.split(",")]
         names = [a.name] if a.cmd == "round" else [f"{a.prefix}-{a.base.split('/')[-1].split('-')[1].lower()}-r{i}-{int(time.time()) % 100000}" for i in range(a.rounds)]
