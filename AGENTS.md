@@ -73,7 +73,7 @@ See README.md (deep dive) and docs/model-cards/ (one card per checkpoint: recipe
 
 ## Skills (.devin/skills)
 - `kev-verify`: how to prove a change has no regression (unit suites, weight-backed parity, worktree parity harness against main) and ship it as a stacked, reviewed, squash-merged PR.
-- `thermonuclear-code-review`: the strict structural review applied to every PR; its table lists the canonical home of each shared rule.
+- `thermonuclear-code-review`: how to apply the installed `thermo-nuclear-code-quality-review` standards to this repo; its table lists the canonical home of each shared rule.
 - `kev-modal-study` (.agents/skills): launching and pulling Modal studies.
 
 ## Layout

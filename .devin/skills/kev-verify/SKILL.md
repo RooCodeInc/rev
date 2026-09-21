@@ -44,10 +44,11 @@ Run the *old* code from a worktree and the new code from the checkout on the sam
 
 ```bash
 git worktree add /tmp/kev-main origin/main
-OLD="env PYTHONPATH=/tmp/kev-main $PWD/.venv/bin/python"          # `import kev` resolves to the worktree
+OLD="env PYTHONPATH=/tmp/kev-main $PWD/.venv/bin/python"          # `import kev` resolves to the worktree; kev is not installed in the venv
+CKPT="$PWD/runs/smoke-hl/00-trial-0/checkpoint"; SUITE="$PWD/evals/smoke-v1"   # absolute: runs/ weights exist only in this checkout
 # benchmark rows/report (model, loader, metrics, api, data)
-(cd /tmp/kev-main && $OLD -m kev.benchmark --run $PWD/runs/smoke-hl/00-trial-0/checkpoint --suite $PWD/evals/smoke-v1 --out /tmp/bench-main)
-uv run python -m kev.benchmark --run runs/smoke-hl/00-trial-0/checkpoint --suite evals/smoke-v1 --out /tmp/bench-new
+(cd /tmp/kev-main && $OLD -m kev.benchmark --run "$CKPT" --suite "$SUITE" --out /tmp/bench-main)
+uv run python -m kev.benchmark --run "$CKPT" --suite "$SUITE" --out /tmp/bench-new
 # -> rows.json must be identical; report.json identical on every numeric field
 # training (trainer, losses, augmentation): same args on CPU, then compare head.pt["head"] tensors and adapter_model.safetensors
 ARGS="--n_per_source 4 --epochs 1 --accum 2 --batch 2 --device cpu --base Qwen/Qwen2.5-0.5B --lr 1e-4 --perm_kl 0.2 --perm_frac 1 --p_none_pair 0.5 --ord_w 0.3"
@@ -55,7 +56,7 @@ ARGS="--n_per_source 4 --epochs 1 --accum 2 --batch 2 --device cpu --base Qwen/Q
 # data converters: json.dumps(build(3, "test", 0, only=[...])) from both trees must be equal
 ```
 
-Use absolute paths for anything the worktree process opens. CPU runs with fixed seeds are deterministic, so
+Everything the worktree process opens must be an absolute path into this checkout. CPU runs with fixed seeds are deterministic, so
 "max |Δ| = 0.0" is the bar; a nonzero difference is a behaviour change to explain in the PR or fix.
 
 ## 5. Ship
