@@ -22,7 +22,7 @@ RULES = [
     ("the training context is kev.model.MAX_STATE/MAX_BRANCH/MAX_PACKED (kev.suite.CONTEXT in manifests) and kev.model.fits",
      r"(?<![\w.])(>|<=|>=|<)\s*2048\b|\b2048\s*(<|>)|max_(branch|state|packed)\"?\s*[=:]\s*\d{3,}", {"kev/model.py"}),
     ("device selection, synchronize and empty_cache go through kev.device (the Space and the Qwen3.5 probe are CUDA-only one-offs)",
-     r"is_available\(\) else|torch\.(mps|cuda)\.(synchronize|empty_cache)\(", {"kev/device.py", "space/app.py", "modal_probe35.py"}),
+     r"is_available\(\) else|torch\.(mps|cuda)\.(synchronize|empty_cache|current_allocated_memory|max_memory_allocated)\(", {"kev/device.py", "space/app.py", "modal_probe35.py"}),
 ]
 
 

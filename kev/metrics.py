@@ -207,9 +207,9 @@ def fit_temperature(rows, aggregation="macro"):
 
 
 def paired_bootstrap(candidate, reference, samples=1000, seed=0, metric="nll", aggregation="macro"):
-    nonlinear = {"coverage_at_5pct_error", "coverage_at_1pct_error", "aurc", "ece"}
-    additive = {"acc", "nll", "brier", "mean_conf", "confident_error_rate", "coverage_at_0_9", "confidence_bias"}   # means of _row_scores
-    if metric not in nonlinear | additive or aggregation not in ("micro", "macro") or samples < 1:
+    nonlinear = {"coverage_at_5pct_error", "coverage_at_1pct_error", "aurc", "ece"}   # recomputed on every resample
+    additive = metric not in nonlinear                                                  # else a mean of _row_scores
+    if (additive and metric not in _row_scores({"p": [1.0], "label": 0})) or aggregation not in ("micro", "macro") or samples < 1:
         raise ValueError("unsupported bootstrap metric, aggregation, or sample count")
 
     def index(rows):
@@ -244,7 +244,7 @@ def paired_bootstrap(candidate, reference, samples=1000, seed=0, metric="nll", a
         rows = [indexed[key] for key in keys]
         conf = np.asarray([max(r["p"]) for r in rows])
         correct = np.asarray([np.argmax(r["p"]) == r["label"] for r in rows])
-        values = np.asarray([_row_scores(r)[metric] for r in rows]) if metric in additive else None
+        values = np.asarray([_row_scores(r)[metric] for r in rows]) if additive else None
         statistics.append((conf, correct, values))
 
     def statistic(indices, data):
