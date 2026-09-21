@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import modal
 
@@ -202,9 +203,22 @@ def base_probe(base: str, name: str, suite: str = "evals/v4/transfer-v4", tasks:
     print(f"spawned probe {name}: call {call.object_id}; pull with: modal volume get kev-runs /probes/{name} runs/probes/")
 
 
+class Job(NamedTuple):
+    """The arguments of one run_trial call (spawned or starmapped as *job)."""
+    study: str
+    index: int
+    label: str
+    config: dict
+    suite: str
+    expected_sources: dict
+    git_commit: str
+    existing: str | None
+    transfer: str | None
+
+
 def admit_study(suite, plan_path, name, gpu, existing, transfer, budget, timeout):
     """Validate a study locally before anything is spawned (name, budget bound against the timeout, plan, uncommitted
-    changes) and build the run_trial job tuples. Returns (jobs, bound_usd)."""
+    changes) and build the run_trial jobs. Returns (jobs, bound_usd)."""
     from kev.experiment import load_plan
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", name):
         raise ValueError("study name must be a simple unique identifier")
@@ -221,7 +235,7 @@ def admit_study(suite, plan_path, name, gpu, existing, transfer, budget, timeout
     if subprocess.run(["git", "status", "--porcelain", "kev", "evals"], cwd=ROOT, capture_output=True, text=True).stdout.strip():
         print("warning: kev/ or evals/ has uncommitted changes; provenance records the last commit, not the working tree", flush=True)
     entries = [(None, p) for p in existing] + [(t, None) for t in trials]
-    return [(name, i, Path(ex).name if ex else f"trial-{i}", cfg or {}, suite, sources, commit, ex, transfer) for i, (cfg, ex) in enumerate(entries)], upper
+    return [Job(name, i, Path(ex).name if ex else f"trial-{i}", cfg or {}, suite, sources, commit, ex, transfer) for i, (cfg, ex) in enumerate(entries)], upper
 
 
 def deployed_run_trial(sources):
@@ -242,10 +256,10 @@ def launch_detached(suite, plan_path, name, gpu, existing=(), transfer=None, bud
     """Validate locally, spawn every trial as its own call on the deployed app, record the call ids and return. Results
     land on the volume; `pull --name` collects and ranks them."""
     jobs, upper = admit_study(suite, plan_path, name, gpu, existing, transfer, budget, timeout)
-    fn = deployed_run_trial(jobs[0][5]).with_options(gpu=gpu, timeout=timeout, retries=0)
+    fn = deployed_run_trial(local_source_hashes()).with_options(gpu=gpu, timeout=timeout, retries=0)
     calls = [fn.spawn(*job) for job in jobs]
     (ROOT / "runs").mkdir(exist_ok=True)
-    (ROOT / "runs" / f"{name}.spawn.json").write_text(json.dumps({"name": name, "calls": {j[2]: c.object_id for j, c in zip(jobs, calls)}, "bound_usd": round(upper, 2), "timeout": timeout}))
+    (ROOT / "runs" / f"{name}.spawn.json").write_text(json.dumps({"name": name, "calls": {j.label: c.object_id for j, c in zip(jobs, calls)}, "bound_usd": round(upper, 2), "timeout": timeout}))
     print(f"spawned study {name}: {len(jobs)} independent trial(s) on {gpu}, bound ${upper:.2f}. Pull later: modal run modal_app.py::pull --name {name}", flush=True)
 
 
@@ -256,7 +270,7 @@ def launch(suite, plan_path, name, gpu, existing=(), transfer=None, budget=20.0,
     print(f"launching {len(jobs)} trial(s) on {gpu} for study {name}", flush=True)
     results = list(fn.starmap(jobs, return_exceptions=True))
     for job, result in zip(jobs, results):
-        print(job[2], result if isinstance(result, Exception) else json.dumps(result), flush=True)
+        print(job.label, result if isinstance(result, Exception) else json.dumps(result), flush=True)
     failures = [r for r in results if isinstance(r, Exception)]
     if len(failures) == len(results):
         raise SystemExit(f"all {len(results)} trial(s) failed; nothing to pull")

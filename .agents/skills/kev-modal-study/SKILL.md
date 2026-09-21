@@ -12,7 +12,7 @@ All GPU work in this repo goes through two files. Never train large models local
 1. **Plan file** in `experiments/<name>.json`: a list of trial dicts. Allowed keys: `kev/experiment.py::DEFAULTS`, `CHOICES`, plus `base`, `base_revision` (40-hex, required if the suite does not pin the base), `train_sources`, `anchor*`, `init_from` (Hub id[@rev] or `/runs/...` path), `data` (`evals/**/*.jsonl`), `replay` (int). Validate locally first:
    `uv run python -c "from pathlib import Path; from kev.experiment import load_plan; print(len(load_plan(Path('evals/v7/decision-v7'), Path('experiments/X.json'))))"`
 2. **Deploy if `kev/*.py` changed** (the launcher refuses otherwise: "deployed app has different kev/*.py"): `uv run modal deploy modal_app.py`. Redeploying while trials run is safe — in-flight containers keep their image — but wait for trials that are seconds from finishing if you can.
-3. **Launch** (server-side fan-out; survives disconnects):
+3. **Launch** (each trial is spawned as its own call on the deployed app; survives disconnects):
    `uv run modal run modal_app.py::study --suite evals/v7/decision-v7 --plan experiments/X.json --name X --transfer evals/v4/transfer-v4 --budget 30 --timeout 5400`
    Names are immutable: a failed study needs a new name (`X2`). Timeout max 14400. Bound cost is printed; H100 ≈ $3.95/h.
 4. **Monitor**: `uv run modal app logs kev-research | grep -a -E "step .*/|evaluated|Error" | tail`. Per-trial status without logs:

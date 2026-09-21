@@ -340,7 +340,7 @@ def main():
         aggregate(a.out); return
     if a.resume:
         if not a.suite: ap.error("--suite is required with --resume")
-        suite = Path(a.suite).resolve(); expected = None
+        suite = Path(a.suite).resolve()
         for directory in sorted(Path(a.out).iterdir()):
             if (directory / "checkpoint" / "head.pt").exists() and not (directory / "result.json").exists():
                 print(f"Resuming evaluation for {directory.name}", flush=True)

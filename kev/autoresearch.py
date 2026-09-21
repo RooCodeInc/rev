@@ -15,7 +15,7 @@ Selection happens on development partitions only. A round's winner becomes the i
 mutations; a config is never re-run with the same seed.
 
 Budget: before each round, `modal billing summary` is read; the loop stops when metered spend since `--spend-start`
-exceeds `--spend-cap`. Per-round admission bounds still apply in modal_app.launch.
+exceeds `--spend-cap`. Per-round admission bounds still apply in modal_app.admit_study.
 """
 import argparse
 import json
@@ -40,11 +40,12 @@ def config_digest(value):
 
 # per-backbone execution shape, not part of a recipe: hidden from knob summaries
 INFRA_KEYS = ("base", "seed", "base_revision", "dtype", "checkpointing", "batch", "accum", "perm_frac")
+ALL_DEFAULTS = {**DEFAULTS, **CHOICE_DEFAULTS}   # what kev.train does when a knob is not given
 
 
 def knobs(cfg):
     """The recipe a config expresses: every non-default, non-infrastructure parameter."""
-    return {k: v for k, v in sorted(cfg.items()) if k not in INFRA_KEYS and v != {**DEFAULTS, **CHOICE_DEFAULTS}.get(k)}
+    return {k: v for k, v in sorted(cfg.items()) if k not in INFRA_KEYS and v != ALL_DEFAULTS.get(k)}
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITE, TRANSFER = "evals/v4/decision-v4", "evals/v4/transfer-v4"
@@ -153,7 +154,7 @@ def propose(rows, base, n, seed, suite_manifest, incumbent_cfg=None, rng_seed=0)
         k = rng.sample(list(SPACE), rng.choice([1, 1, 1, 2]))
         cfg = dict(parent)
         for knob in k:
-            current = parent.get(knob, {**DEFAULTS, **CHOICE_DEFAULTS}.get(knob))
+            current = parent.get(knob, ALL_DEFAULTS.get(knob))
             choices = [v for v in SPACE[knob] if v != current]
             if not choices: continue
             cfg[knob] = rng.choice(choices)
