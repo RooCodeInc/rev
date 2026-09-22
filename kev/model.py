@@ -191,6 +191,17 @@ def encode(tok, rec, max_state=MAX_STATE, max_branch=MAX_BRANCH, strict=False, o
     return enc
 
 
+def media_key(enc):
+    """A digest of a record's media inputs, for anything keyed on the state (the serving prefix cache): the placeholder
+    tokens of two images of the same size are identical, so the state's token ids alone do not identify it."""
+    import hashlib
+    h = hashlib.sha256()
+    for m in enc.get("media") or []:
+        for k in sorted(m["inputs"]):
+            v = m["inputs"][k]; h.update(k.encode()); h.update(str(tuple(v.shape)).encode()); h.update(v.cpu().numpy().tobytes())
+    return h.hexdigest() if enc.get("media") else None
+
+
 def collate_media(items, device, dtype):
     """One batch of multimodal inputs for the items of several records, in placeholder order (record by record), which
     is the order Gemma scatters features in. Items differ in patch, frame and audio-frame counts: they are padded with

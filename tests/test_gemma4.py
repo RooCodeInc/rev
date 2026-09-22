@@ -220,3 +220,12 @@ def test_media_trains_with_frozen_encoders(tiny):
     towers = [p for p in m.mm.parameters() if id(p) not in lm_ids]
     assert towers and all(p.grad is None and not p.requires_grad for p in towers)
     assert all(p.grad is not None for n, p in m.lm.named_parameters() if p.requires_grad and "lora_B" in n)
+
+
+def test_media_key_tells_same_sized_images_apart(tiny):
+    """Two images of the same size have identical placeholder tokens; the serving prefix cache keys on media_key too."""
+    from kev.model import media_key
+    tok, m, _ = media_model(tiny)
+    a, b = (m.encode(tok, media_rec(seed=s, kinds=("image",)), **LONG) for s in (0, 1))
+    assert a["ids"] == b["ids"] and media_key(a) != media_key(b) and media_key(a) == media_key(m.encode(tok, media_rec(seed=0, kinds=("image",)), **LONG))
+    assert media_key(m.encode(tok, REC)) is None
