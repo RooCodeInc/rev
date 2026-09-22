@@ -409,7 +409,9 @@ class DecisionModel(nn.Module):
             kinds = {m["type"] for m in rec["media"]}
             for kind, cfg in (("audio", "audio_config"), ("image", "vision_config"), ("video", "vision_config")):
                 if kind in kinds and getattr(self.mm.config, cfg, None) is None: raise ValueError(f"{self.name} has no {kind} input")
-            media = prepare_media(self.processor, rec["media"])
+            from .media import load
+            items = [load(m) if isinstance(m.get("data"), str) or "path" in m or "url" in m else m for m in rec["media"]]
+            media = prepare_media(self.processor, items)
         return encode(tok, rec, option_isolation=self.option_isolation, media=media, **kw)
 
     @property

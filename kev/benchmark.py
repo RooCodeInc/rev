@@ -20,7 +20,7 @@ from kev.contrastive import paired_flip
 from kev.data import api_request, load_records
 from kev.device import default_device
 from kev.metrics import EPSILON, grouped_metrics, metrics, unknowable_report
-from kev.model import ContextOverflow
+from kev.model import ContextOverflow, training_context
 from kev.predictors import LocalPredictor, RemotePredictor, RotationAveraged
 from kev.suite import CONTEXT, ENCODING, digest, load_split, read_manifest, record_digest, write_json
 
@@ -150,6 +150,8 @@ def main():
     ap.add_argument("--remote-model", default="kev-latest")
     ap.add_argument("--suite", help="frozen suite directory (scores its development partition)")
     ap.add_argument("--data", help="your own labelled requests, one JSON object per line (kev.data.load_records); an alternative to --suite")
+    ap.add_argument("--max_state", type=int, default=None, help="--data only: the state limit to score within (kev.model.training_context), "
+                                                                "e.g. the one the checkpoint was trained with; records with media need several hundred tokens")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", choices=["cpu", "mps", "cuda"], default=default_device())
     ap.add_argument("--allow-test", action="store_true")
@@ -163,7 +165,7 @@ def main():
     if bool(a.suite) == bool(a.data): ap.error("give exactly one of --suite or --data")
     if a.data:
         records, heldout, split, source_hash = load_records(a.data), [], "custom", digest(Path(a.data))
-        context, skip_overlong = CONTEXT, True
+        context, skip_overlong = (training_context(a.max_state) if a.max_state else CONTEXT), True
     else:
         split = "test" if a.allow_test else a.split
         records = load_split(a.suite, split, allow_test=a.allow_test)

@@ -80,8 +80,15 @@ class Server:
         return {"model": req.model, "answers": answers, "usage": {"input_tokens": m["tokens"], "output_tokens": output_tokens(self.tok, answers)}, "latency_ms": m["latency_ms"]}
 
 
+MEDIA_URLS = os.environ.get("KEV_MEDIA_URLS") == "1"   # fetching media URLs server-side is opt-in (it makes the server an HTTP client)
+
+
 def prepare(req):
-    """Opt-in preprocessing applied to every request before the model sees it."""
+    """Opt-in preprocessing applied to every request before the model sees it. Media must arrive inline (base64 `data`):
+    a `path` would read the server's own files, and a `url` is fetched only with KEV_MEDIA_URLS=1."""
+    for m in req.media:
+        if m.path is not None or (m.url is not None and not MEDIA_URLS):
+            raise HTTPException(422, "media must be sent as base64 `data`" + ("" if MEDIA_URLS else " (or `url` with KEV_MEDIA_URLS=1 on the server)"))
     return req.model_copy(update={"state": with_date_facts(req.state)}) if DATE_FACTS else req
 
 

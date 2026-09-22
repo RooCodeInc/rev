@@ -377,6 +377,8 @@ def load_records(path, source="custom"):
         for qid, q in r["questions"].items():
             if "label" not in q: raise ValueError(f"{path}:{n + 1}: question {qid!r} has no label")
             q.setdefault("src", f"{source}_{q['type']}")
+        for m in r.get("media") or []:                  # media paths are relative to the JSONL file
+            if m.get("path") is not None: m["path"] = str((Path(path).parent / m["path"]).resolve())
         text = json.dumps(r["state"], sort_keys=True, ensure_ascii=False) if not isinstance(r["state"], str) else r["state"]
         r["_meta"] = {**{"source": source, "variant": "clean", "id": f"{source}/{n}", "group_id": f"{source}/{n}", "row": n, "split": "custom",
                          "text_sha256": hashlib.sha256(" ".join(text.casefold().split()).encode()).hexdigest()}, **r.get("_meta", {})}
@@ -388,9 +390,11 @@ def load_records(path, source="custom"):
 def api_request(record):
     """The /v1/systemone request body for a labelled record: state and typed questions only, never labels, targets or
     metadata (this is what leaves the machine when a remote predictor is scored)."""
-    return {"state": record["state"], "questions": {
+    out = {"state": record["state"], "questions": {
         qid: {k: v for k, v in q.items() if k in ("type", "instructions", "criteria")}
         for qid, q in record["questions"].items()}}
+    if record.get("media"): out["media"] = record["media"]
+    return out
 
 
 def materialize(req):

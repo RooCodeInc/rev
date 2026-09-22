@@ -79,7 +79,15 @@ def accumulation_records(n, batch, accum, microbatch):
 
 # --- data -------------------------------------------------------------------------------------------------------------
 
-def training_requests(a, tok, manifest, holdout):
+def fits_media(model, tok, rec, context):
+    """fits() for a record with media: its items' tokens are only known after the base's processor has run."""
+    try:
+        return len(model.encode(tok, rec, strict=True, max_state=context["max_state"], max_branch=context["max_branch"])["ids"]) <= context["max_packed"]
+    except ValueError:
+        return False
+
+
+def training_requests(a, tok, manifest, holdout, model=None):
     """The labelled requests one run trains on: the suite's training partition, records built from the public sources,
     or the user's own file (optionally with a replay sample from the suite); filtered to the training context, checked
     against the eval-only policy, then the ablation knobs (--train_sources, --public_frac, --synthetic_repeat)."""
@@ -100,7 +108,8 @@ def training_requests(a, tok, manifest, holdout):
         # tokenizers of their pinned bases; records built on the fly here are not, and another tokenizer can count more
         # tokens (Gemma 4 on decision-v7 train: 1 of 12,576), so apply the same rule instead of letting the strict encoder
         # abort the run (issue #5)
-        kept = [r for r in reqs if fits(materialize(r), tok, **training_context(a.max_state))]
+        c = training_context(a.max_state)
+        kept = [r for r in reqs if (fits_media(model, tok, materialize(r), c) if r.get("media") else fits(materialize(r), tok, **c))]
         if len(kept) < len(reqs):
             c = training_context(a.max_state)
             print(f"dropped {len(reqs) - len(kept)} of {len(reqs)} records that exceed the training context "
@@ -246,8 +255,8 @@ def parse_args():
     a = ap.parse_args()
     if min(a.epochs, a.accum, a.n_per_source, a.lora, a.batch, a.synthetic_repeat) < 1 or not 0 < a.public_frac <= 1:
         ap.error("epochs, accum, n_per_source, lora, batch and synthetic_repeat must be positive; 0 < public_frac <= 1")
-    if a.dtype == "bf16" and a.device != "cuda":
-        ap.error("--dtype bf16 requires --device cuda")
+    if a.dtype == "bf16" and a.device not in ("cuda", "mps"):
+        ap.error("--dtype bf16 requires --device cuda or mps")
     if a.lr <= 0 or a.head_lr < 0 or a.weight_decay < 0 or min(a.ord_w, a.perm_kl, a.anchor_w) < 0 or not 0 <= a.perm_frac <= 1:
         ap.error("invalid learning rate or loss weights")
     loss_options = (a.label_smoothing, a.brier_w, a.focal_gamma)
@@ -282,7 +291,7 @@ def main():
     dev = a.device or default_device()
     if dev == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True; torch.backends.cudnn.allow_tf32 = True
-    autocast = torch.autocast("cuda", dtype=torch.bfloat16) if a.dtype == "bf16" else contextlib.nullcontext()
+    autocast = torch.autocast(dev, dtype=torch.bfloat16) if a.dtype == "bf16" else contextlib.nullcontext()   # cuda, or mps (torch >= 2.6)
     manifest = read_manifest(a.suite) if a.suite else None
     revision = pinned_revision(a, manifest)
     holdout = manifest["holdout_sources"] if manifest else [s for s in a.holdout.split(",") if s]
@@ -308,7 +317,7 @@ def main():
         print(f"delta: warm start from {init_source['resolved']}: {init_source['adapter_tensors']} adapter tensors and the pointer head loaded", flush=True)
     print(f"device={dev} trainable params={sum(p.numel() for p in model.trainable_parameters())/1e6:.1f}M", flush=True)
 
-    reqs = training_requests(a, tok, manifest, holdout)
+    reqs = training_requests(a, tok, manifest, holdout, model)
     suite_hash = digest(Path(a.suite) / "manifest.json") if manifest else None
     write_json(out_dir / "training_config.json", {"args": vars(a), "suite_sha256": suite_hash, "base_revision": revision, "init_source": init_source,
                                                 "ordinal_objective": "ranked_probability_score", "holdout": holdout})

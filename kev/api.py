@@ -40,10 +40,25 @@ class Score(BaseModel):
 Question = Union[Noul, Choice, Score]
 
 
+class Media(BaseModel):
+    """An image, audio clip or video that belongs to the state (kev.media.load). Exactly one of path (local file:
+    training and benchmarks only; the server refuses it), url, or data (base64)."""
+    type: Literal["image", "audio", "video"]
+    path: str | None = None
+    url: str | None = None
+    data: str | None = None
+
+    @model_validator(mode="after")
+    def _one_source(self):
+        if sum(x is not None for x in (self.path, self.url, self.data)) != 1: raise ValueError("a media item needs exactly one of path, url or data")
+        return self
+
+
 class SystemOneRequest(BaseModel):
     state: JSONContent
     model: str = "kev-latest"
     questions: dict[str, Question] = Field(min_length=1)
+    media: list[Media] = Field(default_factory=list)   # Rev extension: opens the state, in order, before the state text
 
 
 def render(v: JSONContent, indent: int = 0) -> str:
@@ -114,7 +129,9 @@ def to_record(req: SystemOneRequest):
             opts = [render(x) for x in q.criteria]
             m["legend"] = dict(zip(m["keys"], opts))
         qs.append({"instr": render(q.instructions), "options": opts, "label": 0}); meta.append(m)
-    return {"state": render(req.state), "questions": qs}, meta
+    rec = {"state": render(req.state), "questions": qs}
+    if req.media: rec["media"] = [m.model_dump(exclude_none=True) for m in req.media]
+    return rec, meta
 
 
 def choice_confidence(p: list[float]) -> float:

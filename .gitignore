@@ -115,3 +115,6 @@ skills/kev-finetune/runs/
 evals/round4/longstate-v1/train.jsonl
 evals/round4/distill-9b-v1/soft.jsonl
 evals/round4/distill-9b-v1/hard.jsonl
+
+# built multimodal decision sets (scripts/build_mm_*.py): media files + JSONL, large; rebuilt from pinned Hub revisions
+/data/
