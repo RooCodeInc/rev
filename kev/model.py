@@ -109,7 +109,34 @@ def user_tokens(tok, text):
 OPT_NONE, OPT_DECIDE = -1, -2   # values of enc["opt"]: instruction/state tokens, and the <decide> token
 
 
-def encode(tok, rec, max_state=MAX_STATE, max_branch=MAX_BRANCH, strict=False, option_isolation=False):
+MEDIA_TYPES = ("image", "video", "audio")
+
+
+def prepare_media(processor, items):
+    """Run the base's own processor on each media item of a record ({"type": "image" | "video" | "audio", "data": ...,
+    video: optional "metadata" {"fps", "total_num_frames"} and "num_frames"}). Returns one dict per item: `ids`, the item's
+    tokens exactly as Gemma lays them out (<|image> placeholders <image|>; video: one "MM:SS <|image> ... <image|>" per
+    sampled frame; audio: <|audio> placeholders <audio|>), `types` (Gemma's mm_token_type_ids: 1 image, 2 video frame,
+    3 audio, 0 text) and `inputs`, the tensors the multimodal forward takes (pixel values, patch positions, audio features)."""
+    bos = family(processor.tokenizer)["bos"]
+    out = []
+    for it in items:
+        kind = it["type"]
+        if kind == "image": kw = {"text": processor.image_token, "images": [it["data"]]}
+        elif kind == "audio": kw = {"text": processor.audio_token, "audio": [it["data"]]}
+        elif kind == "video":
+            kw = {"text": processor.video_token, "videos": [it["data"]]}
+            if "metadata" in it: kw["video_metadata"] = [it["metadata"]]
+            if "num_frames" in it: kw["videos_kwargs"] = {"num_frames": it["num_frames"]}
+        else: raise ValueError(f"media type must be one of {MEDIA_TYPES}, got {kind!r}")
+        enc = dict(processor(**kw, return_tensors="pt"))
+        ids, types = enc.pop("input_ids")[0].tolist(), enc.pop("mm_token_type_ids")[0].tolist(); enc.pop("attention_mask", None)
+        if ids[: len(bos)] == bos: ids, types = ids[len(bos):], types[len(bos):]
+        out.append({"type": kind, "ids": ids, "types": types, "inputs": enc})
+    return out
+
+
+def encode(tok, rec, max_state=MAX_STATE, max_branch=MAX_BRANCH, strict=False, option_isolation=False, media=None):
     """Pack one record: [<state> ...] then per-question [<q> instr <opt> o </opt>... <decide>].
 
     Returns ids, seg (0 = state, k = question k), pos (branch positions restart after state),
@@ -119,10 +146,15 @@ def encode(tok, rec, max_state=MAX_STATE, max_branch=MAX_BRANCH, strict=False, o
     option_isolation=True: every option span is its own sub-branch (it sees state + instruction + itself only), all
     option spans share the same position ids, and <decide> sits at one fixed position after the longest span. Then the
     per-option representations and <decide>'s attention over them are permutation-invariant by construction.
+
+    media (prepare_media output): the items open the state, in order, after <state>; the state text follows. Truncation
+    only ever cuts text. The encoding then also carries `media` (the items) and `blk`, a block id per token: every image
+    and every video frame is one block, which attends to itself in both directions (Gemma's rule); -1 elsewhere.
     """
     fam = family(tok); head = fam["bos"] + fam["delims"][:1]          # [<bos>] <state>: the state's fixed tokens
+    for m in media or []: head = head + m["ids"]
     state_tokens = user_tokens(tok, rec["state"])
-    if strict and len(state_tokens) + len(head) > max_state:
+    if len(head) > max_state or (strict and len(state_tokens) + len(head) > max_state):
         raise ContextOverflow(f"state exceeds {max_state} tokens: {len(state_tokens) + len(head)}")
     S = head + state_tokens[: max_state - len(head)]
     ids, seg, pos, opt = list(S), [0] * len(S), list(range(len(S))), [OPT_NONE] * len(S)
@@ -146,8 +178,38 @@ def encode(tok, rec, max_state=MAX_STATE, max_branch=MAX_BRANCH, strict=False, o
             cursor += len(sp); ends.append(cursor - 1)
         ids += br; seg += [k] * len(br); pos += br_pos; opt += br_opt
         decide_idx.append(base + len(br) - 1); opt_idx.append([base + e for e in ends])
-    return {"ids": ids, "seg": seg, "pos": pos, "opt": opt, "option_isolation": option_isolation, "decide_idx": decide_idx, "opt_idx": opt_idx,
-            "labels": [q["label"] for q in rec["questions"]], "state_truncated": len(state_tokens) + len(head) > max_state}
+    enc = {"ids": ids, "seg": seg, "pos": pos, "opt": opt, "option_isolation": option_isolation, "decide_idx": decide_idx, "opt_idx": opt_idx,
+           "labels": [q["label"] for q in rec["questions"]], "state_truncated": len(state_tokens) + len(head) > max_state}
+    if media:
+        types = [0] * (len(fam["bos"]) + 1) + [t for m in media for t in m["types"]]
+        blk, n = [-1] * len(ids), -1
+        for i, t in enumerate(types):
+            if t in (1, 2):                                         # image / video-frame placeholders; audio stays causal
+                if i == 0 or types[i - 1] not in (1, 2): n += 1
+                blk[i] = n
+        enc.update(media=media, blk=blk)
+    return enc
+
+
+def collate_media(items, device, dtype):
+    """One batch of multimodal inputs for the items of several records, in placeholder order (record by record), which
+    is the order Gemma scatters features in. Items differ in patch, frame and audio-frame counts: they are padded with
+    patch position -1 and audio mask False, which Gemma treats as padding and drops."""
+    by_key = {}
+    for m in items:
+        for k, v in m["inputs"].items(): by_key.setdefault(k, []).append(v)
+    out = {}
+    for k, vs in by_key.items():
+        shape = [max(v.shape[d] for v in vs) for d in range(1, vs[0].dim())]
+        fill = -1 if k.endswith("position_ids") else (False if vs[0].dtype == torch.bool else 0)
+        padded = []
+        for v in vs:
+            t = torch.full((v.shape[0], *shape), fill, dtype=v.dtype)
+            t[(slice(None), *(slice(0, n) for n in v.shape[1:]))] = v
+            padded.append(t)
+        t = torch.cat(padded).to(device)
+        out[k] = t.to(dtype) if t.is_floating_point() else t
+    return out
 
 
 def fits(rec, *tokenizers, max_state=MAX_STATE, max_branch=MAX_BRANCH, max_packed=MAX_PACKED):
@@ -164,7 +226,7 @@ def branch_mask(seg, device, dtype=torch.float32):
     return branch_mask_batch([seg], device, dtype)
 
 
-def branch_mask_batch(segs, device, dtype=torch.float32, opts=None, length=None, pos=None, window=None):
+def branch_mask_batch(segs, device, dtype=torch.float32, opts=None, length=None, pos=None, window=None, blocks=None, window_clips_blocks=False):
     """Batched block-causal mask, additive [B,1,L,L], right-padded to the longest sequence.
 
     Padded key positions are masked for every query; padded query rows keep the diagonal so no row is fully
@@ -175,7 +237,12 @@ def branch_mask_batch(segs, device, dtype=torch.float32, opts=None, length=None,
     span only; <decide> attends to everything in its question. Instruction tokens never see option spans (causal).
 
     window (sliding-window layers, with `pos`, the position ids): a query also drops keys `window` or more positions
-    behind it. Distance is by position, not index, so a branch sees the same state tokens as its causal row does."""
+    behind it. Distance is by position, not index, so a branch sees the same state tokens as its causal row does.
+
+    blocks (media, one list per record or None): tokens with the same block id >= 0 also attend to each other in both
+    directions (Gemma's rule for an image or a video frame). The two Gemma 4 families differ on the window:
+    gemma4_unified (12B) OR-s the blocks onto the windowed mask; gemma4 (E2B/E4B/26B-A4B/31B) applies the window after
+    the OR (window_clips_blocks) and keeps blocks off global layers, which the caller does by passing no blocks there."""
     L = max(max(len(s) for s in segs), length or 0)
     s = torch.full((len(segs), L), -1, device=device)
     for b, seg in enumerate(segs):
@@ -192,11 +259,20 @@ def branch_mask_batch(segs, device, dtype=torch.float32, opts=None, length=None,
         query_is_decide = (o[:, :, None] == OPT_DECIDE)
         same_option = o[:, None, :] == o[:, :, None]
         allow = allow & (~key_is_option | query_is_decide | same_option)
+    same_block = None
+    if blocks is not None:
+        g = torch.full((len(segs), L), -1, device=device)
+        for b, bl in enumerate(blocks):
+            if bl is not None: g[b, : len(bl)] = torch.tensor(bl, device=device)
+        same_block = (g[:, :, None] == g[:, None, :]) & (g[:, :, None] >= 0)
+        if window_clips_blocks: allow = allow | same_block
     if window is not None:
         p = torch.zeros((len(segs), L), dtype=torch.long, device=device)
         for b, ps in enumerate(pos):
             p[b, : len(ps)] = torch.tensor(ps, device=device)
         allow = allow & ((p[:, :, None] - p[:, None, :]) < window)
+    if same_block is not None and not window_clips_blocks:
+        allow = allow | same_block
     allow = allow | torch.eye(L, dtype=torch.bool, device=device)[None]
     return torch.zeros(len(segs), L, L, dtype=dtype, device=device).masked_fill(~allow, torch.finfo(dtype).min)[:, None]
 
@@ -216,6 +292,23 @@ def rows_of(enc):
         rows.append({"ids": enc["ids"][start:end], "pos": enc["pos"][start:end], "decide": d - start, "opts": [o - start for o in oi]})
         start = end
     return enc["ids"][:Ls], enc["pos"][:Ls], rows
+
+
+def per_clip(get_audio_features):
+    """Wrap a Gemma 4 audio encoder (E2B/E4B's conformer) to run one clip at a time, each trimmed to its own frames, with
+    the outputs padded back. The encoder is not padding-invariant: a clip's features change with the longest clip it is
+    batched with (max |delta| 0.8 on a tiny E4B, even with transformers' own feature-extractor padding), and an answer must
+    not depend on what else is in the batch. The 12B has no audio encoder (samples are projected directly) and needs none."""
+    def run(input_features, input_features_mask, **kw):
+        outs = [get_audio_features(f[None, : int(m.sum())], m[None, : int(m.sum())], **kw) for f, m in zip(input_features, input_features_mask)]
+        T = max(o.pooler_output.shape[1] for o in outs); ref = outs[0].pooler_output
+        pooled = torch.zeros(len(outs), T, ref.shape[-1], dtype=ref.dtype, device=ref.device)
+        mask = torch.zeros(len(outs), T, dtype=torch.bool, device=ref.device)
+        for i, o in enumerate(outs):
+            n = o.pooler_output.shape[1]; pooled[i, :n] = o.pooler_output[0]; mask[i, :n] = o.attention_mask[0]
+        outs[0].pooler_output, outs[0].attention_mask = pooled, mask
+        return outs[0]
+    return run
 
 
 class PointerHead(nn.Module):
@@ -247,7 +340,16 @@ class DecisionModel(nn.Module):
         # eager on MPS/CPU (known-good with our float 4D mask); SDPA on CUDA (accepts arbitrary additive masks).
         attn = attn or ("sdpa" if str(device).startswith("cuda") else "eager")
         # dtype: fp32 for training and exact evaluation; bf16 is a serving option for large backbones (8B on a 32 GB Mac)
-        self.lm = text_backbone(AutoModelForCausalLM.from_pretrained(name, revision=revision, dtype=dtype, attn_implementation=attn))
+        full = AutoModelForCausalLM.from_pretrained(name, revision=revision, dtype=dtype, attn_implementation=attn)
+        self.lm = text_backbone(full)
+        # multimodal bases (Gemma 4): the wrapper around self.lm that embeds images, video frames and audio and scatters them
+        # into the placeholder positions. Its encoders stay frozen; records without media never go through it.
+        self.mm = full.model if full.model is not self.lm else None
+        if self.mm is not None:
+            for prm in self.mm.parameters(): prm.requires_grad_(False)
+            if getattr(getattr(self.mm.config, "audio_config", None), "model_type", None) == "gemma4_audio":
+                self.mm.get_audio_features = per_clip(self.mm.get_audio_features)
+        self.name, self.revision, self._processor = name, revision, None
         self.pad_id = pad_id(tok)
         # hybrid backbones (Qwen3.5: Gated DeltaNet layers, recurrent) cannot honour the block-causal mask, so every
         # question runs as its own causal row continuing from the state (rows_of). Attention-only backbones keep the
@@ -288,8 +390,35 @@ class DecisionModel(nn.Module):
         return str(next(self.lm.parameters()).dtype).removeprefix("torch.")
 
     def encode(self, tok, rec, **kw):
-        """encode() with this model's option-isolation setting; use this from serving/eval code."""
-        return encode(tok, rec, option_isolation=self.option_isolation, **kw)
+        """encode() with this model's option-isolation setting and, for records with "media", the base's processor; use
+        this from serving/eval/training code."""
+        media = None
+        if rec.get("media"):
+            if self.mm is None: raise ValueError(f"{self.name} takes text only; this record has media")
+            kinds = {m["type"] for m in rec["media"]}
+            for kind, cfg in (("audio", "audio_config"), ("image", "vision_config"), ("video", "vision_config")):
+                if kind in kinds and getattr(self.mm.config, cfg, None) is None: raise ValueError(f"{self.name} has no {kind} input")
+            media = prepare_media(self.processor, rec["media"])
+        return encode(tok, rec, option_isolation=self.option_isolation, media=media, **kw)
+
+    @property
+    def processor(self):
+        """The base's multimodal processor (images, video, audio -> placeholder tokens + tensors), loaded on first use: it
+        needs the `media` extra (torchvision, Pillow), which text-only use does not."""
+        if self._processor is None:
+            from transformers import AutoProcessor
+            self._processor = AutoProcessor.from_pretrained(self.name, revision=self.revision)
+        return self._processor
+
+    def _backbone(self, encs, ids, pos, mask, **kw):
+        """Final hidden states of the backbone for these rows. Records with media run through the multimodal wrapper, which
+        embeds their items into the placeholder positions and then runs the same text model under the same mask (a dict
+        mask passes through it unchanged)."""
+        items = [m for e in encs for m in e.get("media") or []]
+        if not items:
+            return self.lm(input_ids=ids, position_ids=pos, attention_mask=mask, **kw)
+        media = collate_media(items, self.device, next(self.mm.parameters()).dtype)
+        return self.mm(input_ids=ids, position_ids=pos, attention_mask=mask, **media, **kw)
 
     def hidden(self, enc):
         return self.hidden_batch([enc])[0, : len(enc["ids"])]
@@ -316,7 +445,7 @@ class DecisionModel(nn.Module):
         if isolate and not all(e.get("option_isolation") for e in encs):
             raise ValueError("cannot mix option-isolated and plain encodings in one batch")
         mask = self._mask(encs, length=ids.shape[1])
-        return self.lm(input_ids=ids, position_ids=pos, attention_mask=mask).last_hidden_state.float()   # head stays fp32
+        return self._backbone(encs, ids, pos, mask).last_hidden_state.float()   # head stays fp32
 
     def _mask(self, encs, length=None, queries_from=0):
         """The packed block-causal mask for these records in the backbone's dtype, keeping query rows from `queries_from` on
@@ -325,9 +454,15 @@ class DecisionModel(nn.Module):
         dt = next(self.lm.parameters()).dtype
         opts = [e["opt"] for e in encs] if any(e.get("option_isolation") for e in encs) else None
         segs, pos = [e["seg"] for e in encs], [e["pos"] for e in encs]
-        full = branch_mask_batch(segs, self.device, dtype=dt, opts=opts, length=length)[:, :, queries_from:, :]
+        blocks = [e.get("blk") for e in encs] if any("blk" in e for e in encs) else None
+        # image blocks (see branch_mask_batch) only where the base was trained with them: use_bidirectional_attention ==
+        # "vision" (12B, 26B-A4B, 31B; E2B/E4B keep images causal), on every layer for gemma4_unified, local layers for gemma4
+        if getattr(self.lm.config, "use_bidirectional_attention", None) != "vision": blocks = None
+        unified = self.mm is not None and self.mm.config.model_type == "gemma4_unified"
+        full = branch_mask_batch(segs, self.device, dtype=dt, opts=opts, length=length, blocks=blocks if unified else None)[:, :, queries_from:, :]
         if self.window is None: return full
-        local = branch_mask_batch(segs, self.device, dtype=dt, opts=opts, length=length, pos=pos, window=self.window)[:, :, queries_from:, :]
+        local = branch_mask_batch(segs, self.device, dtype=dt, opts=opts, length=length, pos=pos, window=self.window, blocks=blocks,
+                                  window_clips_blocks=not unified)[:, :, queries_from:, :]
         return {"full_attention": full, "sliding_attention": local}
 
     def _new_cache(self):
@@ -367,7 +502,11 @@ class DecisionModel(nn.Module):
     def forward_rows_batch(self, encs):
         """Row form: every question of every record is one causal row = state tokens + its branch tokens. Returns the same
         nested logits as forward_batch. Exact isolation by construction (rows are independent); the state is recomputed
-        per row (Q x state tokens), which training accepts; serving uses the prefix cache instead."""
+        per row (Q x state tokens), which training accepts; serving uses the prefix cache instead. Records with media run the
+        state once (prefix) and the branches as rows from its cache: a causal row cannot carry Gemma's image blocks."""
+        if any(e.get("media") for e in encs):
+            if self.training: raise ValueError("records with media train in the packed form (rows_form is for over-long serving requests)")
+            return [self._branch_rows_logits(e, self.prefix(e)[1]) for e in encs]
         rows, readouts = [], []   # one causal row per question; readouts[i] = (record, <decide> offset, option offsets)
         for b, e in enumerate(encs):
             S, Sp, brs = rows_of(e)
@@ -396,12 +535,15 @@ class DecisionModel(nn.Module):
     # Exact by construction: branch tokens never attend to each other across questions (block-causal mask) and the state
     # never sees the branches (causal), so the state's hidden states and KV are identical with or without the branches.
 
-    def _branch_rows_from_prefix(self, enc, cache):
+    def _branch_rows_logits(self, enc, cache):
         """Row-form serving: the branches run as causal rows continuing the cached state (exactly the forward_rows_batch
-        layout, minus the recomputed state)."""
+        layout, minus the recomputed state). Logits per question."""
         S, _, rows = rows_of(enc)
         hs = self._rows_hidden([(r["ids"], r["pos"]) for r in rows], cache=cache, prefix_len=len(S))
-        return [F.softmax(self.head(h[r["decide"]], h[torch.tensor(r["opts"], device=self.device)]), -1).cpu() for h, r in zip(hs, rows)]
+        return [self.head(h[r["decide"]], h[torch.tensor(r["opts"], device=self.device)]) for h, r in zip(hs, rows)]
+
+    def _branch_rows_from_prefix(self, enc, cache):
+        return [F.softmax(z, -1).cpu() for z in self._branch_rows_logits(enc, cache)]
 
     @torch.no_grad()
     def prefix(self, enc):
@@ -409,7 +551,11 @@ class DecisionModel(nn.Module):
         Ls = enc["seg"].count(0)
         ids = torch.tensor([enc["ids"][:Ls]], device=self.device); pos = torch.tensor([enc["pos"][:Ls]], device=self.device)
         # the cache must know the layer types (hybrid backbones keep recurrent + conv states per DeltaNet layer)
-        out = self.lm(input_ids=ids, position_ids=pos, past_key_values=self._new_cache(), use_cache=True)
+        if enc.get("media"):   # the state's own mask, for its image blocks; the items embed through the multimodal wrapper
+            mask = self._mask([{"seg": enc["seg"][:Ls], "pos": enc["pos"][:Ls], "blk": enc["blk"][:Ls]}])
+            out = self._backbone([enc], ids, pos, mask, past_key_values=self._new_cache(), use_cache=True)
+        else:
+            out = self.lm(input_ids=ids, position_ids=pos, past_key_values=self._new_cache(), use_cache=True)
         return Ls, out.past_key_values, out.last_hidden_state[0].float()
 
     @torch.no_grad()
@@ -423,7 +569,7 @@ class DecisionModel(nn.Module):
             Ls, cache, h_state = self.prefix(enc)
             return self._branch_rows_from_prefix(enc, cache), (Ls, cache, h_state)
         ids = torch.tensor([enc["ids"]], device=self.device); pos = torch.tensor([enc["pos"]], device=self.device)
-        out = self.lm(input_ids=ids, position_ids=pos, attention_mask=self._mask([enc]), past_key_values=self._new_cache(), use_cache=True)
+        out = self._backbone([enc], ids, pos, self._mask([enc]), past_key_values=self._new_cache(), use_cache=True)
         h = out.last_hidden_state[0].float()
         out.past_key_values.crop(-(len(enc["ids"]) - Ls))     # keep the state only (negative = drop that many trailing tokens; positive form deprecated in transformers 5)
         return [F.softmax(z, -1).cpu() for z in self._readout(h, enc)], (Ls, out.past_key_values, h[:Ls].clone())

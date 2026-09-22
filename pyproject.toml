@@ -44,6 +44,10 @@ serve = [
 mlx = [
     "mlx-lm>=0.31.3,<0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
+media = [
+    "pillow>=10",
+    "torchvision>=0.23,<0.24",
+]
 
 [dependency-groups]
 dev = [

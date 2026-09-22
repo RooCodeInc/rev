@@ -26,10 +26,10 @@ def shrink(d, layer_types, kv_shared):
     if t.get("hidden_size_per_layer_input"): t.update(hidden_size_per_layer_input=8)
     for key in ("vision_config", "audio_config"):
         m = d.get(key)
-        if not m: continue
+        if not m or m.get("model_type") == "gemma4_unified_audio": continue   # 12B audio: raw samples (640 per token), no layers
+        if m.get("model_type") == "gemma4_audio": m["num_hidden_layers"] = 1; continue   # E4B conformer: widths are tied to the mel bins
         for k, v in dict(hidden_size=32, intermediate_size=64, num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=2,
-                         head_dim=16, global_head_dim=16, mm_embed_dim=32, output_proj_dims=32, audio_embed_dim=32,
-                         subsampling_conv_channels=[8, 4]).items():
+                         head_dim=16, global_head_dim=16, mm_embed_dim=32, output_proj_dims=32, audio_embed_dim=32).items():
             if k in m: m[k] = v
     return d
 
@@ -46,6 +46,11 @@ def tiny(request, tmp_path_factory):
     path = tmp_path_factory.mktemp(f"gemma4-{request.param}")
     AutoModelForCausalLM.from_config(cfg).save_pretrained(path)
     AutoTokenizer.from_pretrained(base, revision=revision).save_pretrained(path)
+    try:                                                                 # the media extra (torchvision) brings the processor
+        from transformers import AutoProcessor
+        AutoProcessor.from_pretrained(base, revision=revision).save_pretrained(path)
+    except (ImportError, ModuleNotFoundError):
+        pass
     return str(path)
 
 
@@ -133,3 +138,85 @@ def test_lora_reaches_attention_and_dense_mlp_and_trains(tiny):
     loss.backward()
     grads = [p.grad for n, p in m.lm.named_parameters() if p.requires_grad and "lora_B" in n]
     assert torch.isfinite(loss) and m.head.q.weight.grad.abs().sum() > 0 and all(g is not None for g in grads)
+
+
+# --- media: images, video frames and audio in the state ------------------------------------------------------------------
+
+def _long():
+    from kev.model import training_context      # media alone is hundreds of tokens; training lifts the limit the same way (--max_state)
+    return {k: v for k, v in training_context(3000).items() if k != "max_packed"}
+
+
+LONG = _long()
+
+
+def media_rec(seed=0, image_hw=(120, 160), audio_s=1.0, kinds=("image", "video", "audio")):
+    import numpy as np
+    from PIL import Image
+    r = np.random.default_rng(seed)
+    items = {"image": {"type": "image", "data": Image.fromarray((r.random((*image_hw, 3)) * 255).astype("uint8"))},
+             "video": {"type": "video", "data": (r.random((8, 64, 96, 3)) * 255).astype("uint8"), "metadata": {"fps": 4, "total_num_frames": 8}, "num_frames": 4},
+             "audio": {"type": "audio", "data": (r.standard_normal(int(16000 * audio_s)) * 0.1).astype("float32")}}
+    return {**REC, "media": [items[k] for k in kinds]}
+
+
+def media_model(tiny):
+    pytest.importorskip("torchvision")
+    from kev.model import DecisionModel, load_tokenizer
+    tok = load_tokenizer(tiny); m = DecisionModel(tiny, tok, "cpu").eval()
+    kinds = ("image", "video") + (("audio",) if m.mm.config.audio_config is not None else ())
+    return tok, m, kinds
+
+
+def test_media_state_matches_gemma_reference(tiny):
+    """The state with media, under Rev's mask (image and frame blocks where the base uses them, window by position), gives
+    the same hidden states as Gemma's own multimodal forward on the same tokens, where transformers builds the masks from
+    mm_token_type_ids with each family's rule."""
+    tok, m, kinds = media_model(tiny)
+    enc = m.encode(tok, media_rec(kinds=kinds), **LONG)
+    Ls = enc["seg"].count(0); items = enc["media"]
+    assert enc["ids"][2] == tok.convert_tokens_to_ids("<|image>") and max(enc["blk"]) >= 4 and sum(b >= 0 for b in enc["blk"]) > 2 * WINDOW
+    from kev.model import collate_media
+    types = [0, 0] + [t for it in items for t in it["types"]]; types += [0] * (Ls - len(types))
+    with torch.no_grad():
+        ours = m.hidden(enc)[:Ls]
+        ref = m.mm(input_ids=torch.tensor([enc["ids"][:Ls]]), mm_token_type_ids=torch.tensor([types]),
+                   **collate_media(items, "cpu", torch.float32)).last_hidden_state[0]
+        no_blocks = m.hidden({**enc, "blk": [-1] * len(enc["blk"])})[:Ls]
+    assert (ours - ref).abs().max() < 1e-4 * ref.abs().max()
+    if m.lm.config.use_bidirectional_attention == "vision":                # E2B/E4B keep images causal: no blocks to test
+        assert (no_blocks - ref).abs().max() > 1e-3 * ref.abs().max()  # the blocks are doing work
+
+
+def test_media_paths_agree_and_isolate(tiny, monkeypatch):
+    """Packed pass, prefix miss/hit, forced row form, one question alone, and a batch of two records whose items differ in
+    size (collate padding) all give the same answers."""
+    from kev import model as M
+    tok, m, kinds = media_model(tiny)
+    rec = media_rec(kinds=kinds); enc = m.encode(tok, rec, **LONG)
+    other = media_rec(seed=1, image_hw=(200, 120), audio_s=0.6, kinds=kinds); enc2 = m.encode(tok, other, **LONG)
+    with torch.no_grad():
+        full = m.probs(enc)
+        miss, prefix = m.probs_and_prefix(enc); hit = m.probs_with_prefix(enc, prefix)
+        alone = [m.probs(m.encode(tok, {**rec, "questions": [q]}, **LONG))[0] for q in rec["questions"]]
+        batched = m.forward_batch([enc2, enc])
+        full2 = m.probs(enc2)
+        monkeypatch.setattr(M, "SERVE_MAX_PACKED", len(enc["ids"]) - 1)
+        rows = m.probs(enc)
+    assert close(full, miss, 1e-4) and close(full, hit, 1e-4) and close(full, alone, 1e-4) and close(full, rows, 1e-4)
+    soft = lambda zs: [torch.softmax(z, -1) for z in zs]
+    assert close(soft(batched[1]), full, 1e-4) and close(soft(batched[0]), full2, 1e-4)
+    assert not close(full, full2, 1e-3)                                    # the media change the answer
+
+
+def test_media_trains_with_frozen_encoders(tiny):
+    tok, m, kinds = media_model(tiny)
+    from kev.model import DecisionModel
+    m = DecisionModel(tiny, tok, "cpu", lora=4); m.train()
+    enc = m.encode(tok, media_rec(kinds=kinds), **LONG)
+    loss = sum(torch.nn.functional.cross_entropy(z[None], torch.tensor([q["label"]])) for z, q in zip(m.forward(enc), REC["questions"]))
+    loss.backward()
+    lm_ids = {id(p) for p in m.lm.parameters()}
+    towers = [p for p in m.mm.parameters() if id(p) not in lm_ids]
+    assert towers and all(p.grad is None and not p.requires_grad for p in towers)
+    assert all(p.grad is not None for n, p in m.lm.named_parameters() if p.requires_grad and "lora_B" in n)
