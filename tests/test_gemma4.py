@@ -1,4 +1,4 @@
-"""Gemma 4 backbones (attention-only, sliding-window + global layers, MoE block beside a dense MLP): encoding, the
+"""Gemma 4 backbones (attention-only, sliding-window + global layers; 26B-A4B, E4B and 12B architectures): encoding, the
 per-layer-type packed mask, prefix cache and isolation, on a tiny random-weight model with the real 26B-A4B architecture
 flags and tokenizer. Downloads the Gemma 4 tokenizer and config only (no weights); not run in CI.
 Run: uv run --extra serve python -m pytest tests/test_gemma4.py -q
@@ -6,25 +6,46 @@ Run: uv run --extra serve python -m pytest tests/test_gemma4.py -q
 import pytest
 import torch
 
-BASE, REVISION = "google/gemma-4-26B-A4B", "24548b62aa021d562695c04aaf7758a1ea47990b"
-WINDOW = 16   # far below the states and rows below, so every local layer drops keys
+# (base, revision, tiny text layers, shared-KV layers): the three Gemma 4 architectures, shrunk. 26B-A4B: MoE beside a dense
+# MLP, vision tower. E4B: per-layer embeddings, shared-KV layers, vision + audio towers. 12B: gemma4_unified, encoder-free
+# vision/audio embedders. Local layers use WINDOW, far below the states and rows below, so every local layer drops keys.
+WINDOW = 16
+BASES = {"26b-a4b": ("google/gemma-4-26B-A4B", "24548b62aa021d562695c04aaf7758a1ea47990b", ["sliding_attention"] * 3 + ["full_attention"], 0),
+         "e4b": ("google/gemma-4-E4B", "411aa17b749aa952df1359d2dcea73917a544d9a", ["sliding_attention", "sliding_attention", "full_attention"] * 2, 2),
+         "12b": ("google/gemma-4-12B", "023679ed352de9bb66cc873c9009ce3482585c08", ["sliding_attention"] * 3 + ["full_attention"], 0)}
+BASE, REVISION = BASES["26b-a4b"][:2]
 
 
-@pytest.fixture(scope="module")
-def tiny(tmp_path_factory):
-    """A 4-layer Gemma 4 (3 sliding, 1 global with k=v attention, 4 experts top-2) saved as a multimodal checkpoint,
-    the way the Hub stores the real one."""
-    from transformers import AutoConfig, AutoTokenizer, Gemma4Config, Gemma4ForConditionalGeneration
-    d = AutoConfig.from_pretrained(BASE, revision=REVISION).to_dict()
-    d["text_config"].pop("per_layer_config", None)                        # derived from layer_types; rebuilt for 4 layers
-    d["text_config"].update(hidden_size=64, intermediate_size=64, moe_intermediate_size=32, num_attention_heads=4, num_key_value_heads=2,
-                            num_global_key_value_heads=1, head_dim=16, global_head_dim=32, num_hidden_layers=4, num_experts=4, top_k_experts=2,
-                            layer_types=["sliding_attention"] * 3 + ["full_attention"], sliding_window=WINDOW)
-    d["vision_config"].update(hidden_size=32, intermediate_size=64, num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=2, head_dim=16, global_head_dim=16)
+def shrink(d, layer_types, kv_shared):
+    """A real Gemma 4 config dict cut down to a few layers and tiny widths, keeping every architecture flag."""
+    t = d["text_config"]; t.pop("per_layer_config", None)                # derived from layer_types; rebuilt for the new depth
+    t.update(hidden_size=64, intermediate_size=64, num_attention_heads=4, num_key_value_heads=2, num_global_key_value_heads=1,
+             head_dim=16, global_head_dim=32, num_hidden_layers=len(layer_types), layer_types=layer_types, sliding_window=WINDOW,
+             num_kv_shared_layers=kv_shared)
+    if t.get("enable_moe_block"): t.update(moe_intermediate_size=32, num_experts=4, top_k_experts=2)
+    if t.get("hidden_size_per_layer_input"): t.update(hidden_size_per_layer_input=8)
+    for key in ("vision_config", "audio_config"):
+        m = d.get(key)
+        if not m: continue
+        for k, v in dict(hidden_size=32, intermediate_size=64, num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=2,
+                         head_dim=16, global_head_dim=16, mm_embed_dim=32, output_proj_dims=32, audio_embed_dim=32,
+                         subsampling_conv_channels=[8, 4]).items():
+            if k in m: m[k] = v
+    return d
+
+
+@pytest.fixture(scope="module", params=list(BASES))
+def tiny(request, tmp_path_factory):
+    """A tiny random-weight copy of one Gemma 4 architecture, saved the way the Hub stores the real one (the multimodal
+    *ForConditionalGeneration class), with the real tokenizer."""
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+    base, revision, layer_types, kv_shared = BASES[request.param]
+    cfg = AutoConfig.from_pretrained(base, revision=revision)
+    cfg = type(cfg)(**shrink(cfg.to_dict(), layer_types, kv_shared))
     torch.manual_seed(0)
-    path = tmp_path_factory.mktemp("gemma4-tiny")
-    Gemma4ForConditionalGeneration(Gemma4Config(**d)).save_pretrained(path)
-    AutoTokenizer.from_pretrained(BASE, revision=REVISION).save_pretrained(path)
+    path = tmp_path_factory.mktemp(f"gemma4-{request.param}")
+    AutoModelForCausalLM.from_config(cfg).save_pretrained(path)
+    AutoTokenizer.from_pretrained(base, revision=revision).save_pretrained(path)
     return str(path)
 
 
@@ -96,14 +117,15 @@ def test_prefix_cache_matches_full_pass(tiny, monkeypatch):
 
 
 def test_lora_reaches_attention_and_dense_mlp_and_trains(tiny):
-    """The adapter hits q/k/v/o (v only on local layers: global ones share k and v) and the dense MLP; the fused experts
-    and the router stay frozen. One checkpointed bf16-weights step reaches the adapter and the head."""
+    """The adapter hits q/k/v/o (v only where a layer has one: k=v global layers and shared-KV layers do not) and the dense
+    MLP; fused experts, the router and per-layer-embedding projections stay frozen. One checkpointed bf16-weights step
+    reaches the adapter and the head."""
     from kev.model import DecisionModel, load_tokenizer
     tok = load_tokenizer(tiny); m = DecisionModel(tiny, tok, "cpu", lora=4, dtype=torch.bfloat16)
     names = {n for n, p in m.lm.named_parameters() if p.requires_grad}
     hit = {n.split(".lora_")[0].split(".")[-1] for n in names}
     assert hit == {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
-    assert not any(".experts." in n or ".router." in n for n in names)
+    assert not any(".experts." in n or ".router." in n or "per_layer" in n for n in names)
     m.lm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False}); m.train()
     enc = m.encode(tok, REC)
     with torch.autocast("cpu", dtype=torch.bfloat16):
