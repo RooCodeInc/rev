@@ -138,8 +138,9 @@ def test_packed_vs_separate(tok, model, reqs, rng, n=30):
 def baseline_letter_logits(base, reqs, dev, rng, chat=False):
     """Zero-shot MCQ baseline on the same rendered text: read next-token logits over option letters. K<=8.
     chat=True wraps the prompt in the model's chat template (for -Instruct models) and asks for the letter only."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(base); lm = AutoModelForCausalLM.from_pretrained(base, dtype=torch.float32).to(dev).eval()
+    from transformers import AutoModelForCausalLM
+    from .model import load_tokenizer
+    tok = load_tokenizer(base); lm = AutoModelForCausalLM.from_pretrained(base, dtype=torch.float32).to(dev).eval()
     letters = list("ABCDEFGH")
     letter_ids = [tok(("" if chat else " ") + L, add_special_tokens=False).input_ids[0] for L in letters]
     by = defaultdict(lambda: {"conf": [], "ok": []})

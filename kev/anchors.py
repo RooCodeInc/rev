@@ -13,7 +13,8 @@ import json
 from pathlib import Path
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
+from .model import load_tokenizer
 
 from kev.api import question_keys
 from kev.device import default_device
@@ -34,7 +35,7 @@ def question_prompt(state, q):
 
 def build(base, suite, out, split="train", device=None, revision=None, max_options=26, batch=16):
     device = device or default_device()
-    tok = AutoTokenizer.from_pretrained(base, revision=revision); tok.padding_side = "left"
+    tok = load_tokenizer(base, revision=revision); tok.padding_side = "left"
     if tok.pad_token is None: tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(base, revision=revision, dtype=torch.bfloat16 if device != "cpu" else torch.float32).to(device).eval()
     letter_ids = [tok.encode(" " + L, add_special_tokens=False)[0] for L in LETTERS]

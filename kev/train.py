@@ -185,6 +185,7 @@ def batch_loss(model, a, batch, dev, anchors, anchor_sources, autocast):
         logits = logits_b[batch.index(v)]
         kls = [permutation_kl(z1.float(), z2.float(), perm, dev) for z1, z2, perm in zip(logits, logits2, v.permuted[1]) if perm is not None]
         kl = sum(kls) / len(kls); loss = loss + a.perm_kl * kl; terms["kl"] += kl.item(); terms["kl_n"] += 1
+    assert isinstance(loss, torch.Tensor)
     if not torch.isfinite(loss):
         raise ValueError("non-finite training loss")
     return loss, terms

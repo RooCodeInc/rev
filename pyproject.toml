@@ -51,11 +51,20 @@ dev = [
     "matplotlib>=3.9",
     "modal==1.5.5",
     "pytest>=9.1.1",
+    "ty==0.0.83",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["server: needs a running kev.serve instance (KEV_BASE_URL)"]
+
+[tool.ty.src]
+include = ["kev", "modal_app.py"]
+
+[[tool.ty.overrides]]
+include = ["kev/mlx_model.py"]          # Apple Silicon only; mlx/mlx-lm are not installed elsewhere
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
 
 [tool.setuptools]
 packages = ["kev"]

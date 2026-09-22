@@ -171,8 +171,8 @@ def main():
     predictor = RemotePredictor(a.remote, a.remote_model, os.environ.get("KEV_REMOTE_API_KEY", "local")) if a.remote else LocalPredictor(a.run, a.device, LoadOptions.from_env(), context=context)
     report, _ = evaluate_records(records, predictor, a.out, heldout_sources=tuple(heldout), skip_overlong=skip_overlong)
     report.update(suite_sha256=source_hash, data=a.data, date_facts=a.date_facts, run=a.run or a.remote, split=split,
-                  calibration_applied=predictor.temperature != 1.0 if not a.remote else None,
-                  remote={"base_url": a.remote, "requested_model": a.remote_model, "served_model": predictor.served_model} if a.remote else None)
+                  calibration_applied=predictor.temperature != 1.0 if isinstance(predictor, LocalPredictor) else None,
+                  remote={"base_url": a.remote, "requested_model": a.remote_model, "served_model": predictor.served_model} if isinstance(predictor, RemotePredictor) else None)
     write_json(Path(a.out) / "report.json", report)
     print(json.dumps({"objective": report["objective"], "clean": report["clean"], "coverage": report["coverage"]}, indent=2))
 

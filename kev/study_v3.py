@@ -129,7 +129,7 @@ def freeze(out, source="evals/decision-v2", transfer="evals/transfer-v2", public
     final_extra = admit_groups(compose(8, "v3-locked", TEST_SHAPES, styles=(2,), source="composition_holdout"))
     for split in ("train", "calibration"):
         random.Random(f"v3-{split}").shuffle(parts[split])
-    manifest = {"version": 3, "base_revisions": revisions, "dataset_revisions": original["dataset_revisions"],
+    manifest: dict[str, object] = {"version": 3, "base_revisions": revisions, "dataset_revisions": original["dataset_revisions"],
         "parent_files": parent_hashes, "holdout_sources": [],
         "trainable_sources": sorted({s for s in original["trainable_sources"] if s != "contrastive"}
                                     | ({s for s in read_manifest(public_train)["trainable_sources"]} if public_train else set())) + ["legacy_policy", "compositional"],
@@ -156,6 +156,8 @@ def freeze(out, source="evals/decision-v2", transfer="evals/transfer-v2", public
         folder = out / name
         folder.mkdir(parents=True, exist_ok=False)
         m = copy.deepcopy(manifest)
+        files: dict[str, dict] = {}
+        m["files"] = files
         if name.startswith("transfer"):
             m.update(trainable_sources=[], holdout_sources=manifest["eval_only_sources"], eval_only=True)
         for split, records in partitions.items():
@@ -172,10 +174,10 @@ def freeze(out, source="evals/decision-v2", transfer="evals/transfer-v2", public
                 if inherit_eval and name.startswith("decision"): records = []   # the inherited test already contains the locked composition groups
             payload += "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records).encode()
             path.write_bytes(payload)
-            m["files"][path.name] = {"sha256": digest(path), "records": inherited_records + len(records),
+            files[path.name] = {"sha256": digest(path), "records": inherited_records + len(records),
                                      "questions": inherited_questions + sum(len(r["questions"]) for r in records)}
         write_json(folder / "manifest.json", m)
-        print(name, {s: v["records"] for s, v in m["files"].items()}, flush=True)
+        print(name, {s: v["records"] for s, v in files.items()}, flush=True)
     if any(digest(p) != h for p, h in parent_hashes.items()):
         raise ValueError("parent artifacts changed")
     return manifest

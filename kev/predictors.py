@@ -105,9 +105,11 @@ class JevPredictor:
         self.process = subprocess.Popen(["node", str(worker)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.DEVNULL, text=True, bufsize=1,
                                         env={**os.environ, "AI_GATEWAY_API_KEY": key})
+        assert self.process.stdin is not None and self.process.stdout is not None
+        self.stdin, self.stdout = self.process.stdin, self.process.stdout
 
     def close(self):
-        self.process.stdin.close()
+        self.stdin.close()
         try:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -119,9 +121,9 @@ class JevPredictor:
             raise RuntimeError("Jev evaluation reached the request/token cost cap")
         request = api_request(record)
         for attempt in range(4):
-            self.process.stdin.write(json.dumps(request) + "\n")
-            self.process.stdin.flush()
-            line = self.process.stdout.readline()
+            self.stdin.write(json.dumps(request) + "\n")
+            self.stdin.flush()
+            line = self.stdout.readline()
             if not line:
                 raise RuntimeError("Jev SDK worker exited without a response")
             result = json.loads(line)

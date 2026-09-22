@@ -218,6 +218,7 @@ def train_checkpoint(config, suite, output, device):
     for key, value in config.items():
         args += ["--" + key, str(value)]
     with (Path(output) / "train.log").open("w", encoding=ENCODING) as log, subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=ROOT) as proc:
+        assert proc.stdout is not None
         for line in proc.stdout:
             log.write(line); log.flush()
             if line.startswith(("ep", "saved", "device", "ablation")) or "Error" in line: print(line.rstrip(), flush=True)

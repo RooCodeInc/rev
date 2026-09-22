@@ -31,7 +31,9 @@ class ContextOverflow(ValueError):
 
 
 def load_tokenizer(name, revision=None):
-    return AutoTokenizer.from_pretrained(name, revision=revision)
+    tok = AutoTokenizer.from_pretrained(name, revision=revision)
+    assert tok is not None
+    return tok
 
 
 def pad_id(tok):

@@ -215,6 +215,7 @@ def run_smoke_base(base, revision):
         m.lm.zero_grad(set_to_none=True); m.head.zero_grad(set_to_none=True); ts = time.time()
         with torch.autocast("cuda", dtype=torch.bfloat16): logits = m.forward_batch(encs)
         loss = sum(torch.nn.functional.cross_entropy(z.float()[None], torch.tensor([q["label"]], device="cuda")) for zs, r in zip(logits, recs) for z, q in zip(zs, r["questions"]))
+        assert isinstance(loss, torch.Tensor)
         loss.backward(); sync("cuda")
         return round(time.time() - ts, 2), loss.item()
     torch.cuda.reset_peak_memory_stats(); t1 = time.time()
@@ -376,7 +377,7 @@ def pull_study(study):
 
 def volume_names(path):
     """Names of the entries directly under `path` on the runs volume, by kind: (directories, files)."""
-    from modal.volume import FileEntryType
+    from modal.volume import FileEntryType  # ty: ignore[unresolved-import]
     entries = runs_volume.listdir(path)
     return ({Path(e.path).name for e in entries if e.type == FileEntryType.DIRECTORY}, {Path(e.path).name for e in entries if e.type == FileEntryType.FILE})
 

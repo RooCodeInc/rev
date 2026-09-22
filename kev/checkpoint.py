@@ -120,7 +120,7 @@ class LoadOptions:
 
 def mlx_available():
     try:
-        import mlx_lm  # noqa: F401
+        import mlx_lm  # noqa: F401  # ty: ignore[unresolved-import]
         return True
     except ImportError:
         return False
@@ -145,7 +145,8 @@ class Checkpoint:
             from huggingface_hub import HfApi
             repo, _, revision = self.requested.partition("@")
             try:
-                return HfApi().model_info(repo, revision=revision or None).last_modified.date().isoformat()
+                info = HfApi().model_info(repo, revision=revision or None)
+                if info.last_modified: return info.last_modified.date().isoformat()
             except Exception:
                 pass
         return datetime.date.fromtimestamp(self.file("head.pt").stat().st_mtime).isoformat()
@@ -196,8 +197,9 @@ class Checkpoint:
         m.lm = PeftModel.from_pretrained(m.lm, self.path, torch_device=str(device)).to(device)   # trainable token embeddings, if any, live in the adapter
         if opts.lora_scale != 1:
             for module in m.lm.modules():
-                if isinstance(getattr(module, "scaling", None), dict):
-                    for k in module.scaling: module.scaling[k] *= opts.lora_scale
+                scaling = getattr(module, "scaling", None)
+                if isinstance(scaling, dict):
+                    for k in scaling: scaling[k] *= opts.lora_scale
             m.lora_scale = opts.lora_scale
         if merge: m.lm = m.lm.merge_and_unload()     # in fp32: exact
         if dtype != torch.float32: m.lm = m.lm.to(dtype)

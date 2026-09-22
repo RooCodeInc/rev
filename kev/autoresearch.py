@@ -158,7 +158,7 @@ def propose(rows, base, n, seed, suite_manifest, incumbent_cfg=None, rng_seed=0)
             choices = [v for v in SPACE[knob] if v != current]
             if not choices: continue
             cfg[knob] = rng.choice(choices)
-        if cfg.get("accum", 1) > 1 and base == "Qwen/Qwen3-0.6B-Base": cfg["batch"] = 8      # effective batch 16 via accum
+        if int(cfg.get("accum", 1)) > 1 and base == "Qwen/Qwen3-0.6B-Base": cfg["batch"] = 8      # effective batch 16 via accum
         cfg["seed"] = seed
         try: full = validated_trial(cfg, suite_manifest)
         except ValueError: continue

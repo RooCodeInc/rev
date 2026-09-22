@@ -10,6 +10,7 @@ date preprocessing (api.with_date_facts). Backend and precision follow LoadOptio
 Silicon the hybrid Qwen3.5 checkpoints run on MLX by default, elsewhere on torch in bf16.
 """
 import argparse, hmac, os, random, threading, time, uuid
+from typing import TYPE_CHECKING
 import torch
 from dataclasses import dataclass, field, replace
 from fastapi import FastAPI, HTTPException
@@ -19,7 +20,11 @@ from pydantic import BaseModel, Field
 from .api import SystemOneRequest, to_record, to_answers, output_tokens, with_date_facts
 from .checkpoint import Checkpoint, LoadOptions, is_hub_id
 from .device import default_device, sync
-from .model import SERVE_MAX_BRANCH, SERVE_MAX_STATE
+from .model import SERVE_MAX_BRANCH, SERVE_MAX_STATE, DecisionModel
+from transformers import PreTrainedTokenizerBase
+
+if TYPE_CHECKING:
+    from .mlx_model import MLXDecisionModel
 
 PREFIX_CACHE_SIZE = int(os.environ.get("KEV_PREFIX_CACHE", "4"))          # states kept (KV + hidden); 0 disables
 PREFIX_MIN_TOKENS = os.environ.get("KEV_PREFIX_MIN_TOKENS")               # states shorter than this are not cached; default = the model's prefix_min_tokens (0 for hybrid backbones and MLX, 384 for attention-only torch models)
@@ -32,8 +37,8 @@ MODEL_NAMES = ("kev-latest", "jev-latest")                               # both 
 class Server:
     """The loaded checkpoint and the state-prefix cache shared by every request (one model, one lock)."""
     checkpoint: Checkpoint
-    tok: object
-    model: object
+    tok: PreTrainedTokenizerBase
+    model: "DecisionModel | MLXDecisionModel"
     device: str
     lock: threading.Lock = field(default_factory=threading.Lock)
     prefix_cache: dict = field(default_factory=dict)   # (state token ids, option_isolation) -> prefix, in LRU order
@@ -122,7 +127,7 @@ def systemone_permute(r: PermuteSystemOne):
     """Re-run one Choice question under n_perm option orders. Returns per-order probabilities keyed by option name."""
     q = r.request.questions.get(r.question)
     if q is None or q.type != "choice": raise HTTPException(422, "question must be an existing choice question")
-    rng = random.Random(r.seed); keys = list(q.criteria); runs = []
+    rng = random.Random(r.seed); keys = list(q.criteria); runs: list[dict] = []
     for i in range(r.n_perm):
         order = list(keys)
         if i > 0: rng.shuffle(order)
