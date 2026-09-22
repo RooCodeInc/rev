@@ -487,6 +487,59 @@ def test_cross_validated_temperature_is_group_disjoint_and_reports_intervals():
     assert result["raw"]["n"] == result["out_of_fold"]["n"] == 40
 
 
+def test_raw_row_inverts_the_served_temperature():
+    import numpy as np
+    from kev.metrics import fit_temperature, raw_row, tempered_row
+    raw = {"variant": "clean", "source": "s", "task": "t", "type": "choice", "label": 0, "logits": [2.0, -1.0, 0.5],
+           "p": (np.exp([2.0, -1.0, 0.5]) / np.exp([2.0, -1.0, 0.5]).sum()).tolist(), "inference_temperature": 1.0}
+    served = tempered_row(raw, 2.3)
+    back = raw_row(served)
+    assert back["inference_temperature"] == 1.0 and np.allclose(back["p"], raw["p"])
+    assert np.allclose(np.asarray(back["logits"]) - max(back["logits"]), np.asarray(raw["logits"]) - max(raw["logits"]))
+    assert raw_row(raw) is raw
+    fit_temperature([back], aggregation="micro")   # accepted as raw
+    with pytest.raises(ValueError, match="raw logits"):
+        fit_temperature([served])
+    with pytest.raises(ValueError, match="recorded none"):
+        raw_row({"p": [0.6, 0.4], "inference_temperature": 2.0})
+    twice = tempered_row(served, 1.5)                        # a second temperature composes, and raw_row still restores T=1
+    assert twice["inference_temperature"] == pytest.approx(2.3 * 1.5) and np.allclose(raw_row(twice)["p"], raw["p"])
+
+
+def test_workload_report_refuses_rows_without_logits():
+    from kev.calibrate import workload_report
+    rows = [{"id": str(i), "source": "jev", "group": f"g{i}", "task": "t", "type": "choice", "variant": "clean",
+             "question": "q", "keys": ["x", "y"], "label": 0, "p": [0.7, 0.3]} for i in range(10)]
+    with pytest.raises(ValueError, match="logits"):
+        workload_report(rows, folds=2, samples=10)
+
+
+def test_workload_report_recovers_a_shared_temperature_and_keeps_accuracy():
+    import numpy as np
+    from kev.calibrate import format_report, workload_report
+    from kev.metrics import tempered_row
+    rng = np.random.default_rng(0)
+    rows = []
+    for source in ("a", "b"):
+        for group in range(12):
+            for k in range(2):
+                i = len(rows)
+                label = int(rng.integers(0, 3))
+                z = rng.normal(0, 1, 3); z[label] += 1.5          # informative, over-confident at T=1
+                p = np.exp(z - z.max()); p /= p.sum()
+                raw = {"id": str(i), "source": source, "group": f"g{group}", "task": "t", "type": "choice", "variant": "clean",
+                       "question": "q", "keys": ["x", "y", "z"], "label": label, "logits": z.tolist(), "p": p.tolist(), "inference_temperature": 1.0}
+                rows.append(tempered_row(raw, 1.7))                # served at the checkpoint's temperature
+    report = workload_report(rows, folds=4, seed=0, samples=50)
+    arms = report["arms"]
+    assert report["shipped_temperature"] == [1.7] and len(report["fold_temperatures"]) == 4
+    assert len({round(arms[a]["acc"], 12) for a in arms}) == 1                      # temperature never moves accuracy
+    assert arms["workload"]["nll"] <= arms["raw"]["nll"] and arms["workload"]["nll"] <= arms["shipped"]["nll"]   # in-sample fit is optimal on the grid
+    assert set(report["oof_vs_shipped"]) == {"ece", "brier", "coverage_at_5pct_error", "aurc"}
+    assert all(b["ci95"][0] <= b["ci95"][1] for b in report["oof_vs_shipped"].values())
+    assert "workload_oof" in format_report(report)
+
+
 def test_cross_validated_temperature_rejects_too_few_groups():
     from kev.metrics import cross_validated_temperature
     rows = [{"id": str(i), "source": "a", "group": f"g{i}", "task": "t", "type": "choice", "variant": "clean",
@@ -765,3 +818,32 @@ def test_semif_external_suites_are_frozen_as_scored(suite, rows, tasks):
             top = sorted(target.values(), reverse=True)
             assert top[0] > top[1], r["_meta"]["id"]
             assert set(target) == set(r["questions"]["decision"]["criteria"])
+
+
+def test_rotation_averaging_cancels_a_position_bias():
+    import math
+    from kev.api import question_keys
+    from kev.predictors import RotationAveraged
+    content = {"a": 1.0, "b": 0.0, "c": -1.0}; position = [2.0, 0.0, 0.0]         # the first slot is favoured by +2 logits
+
+    def biased(record):
+        out = {"probabilities": {}, "logits": {}, "inference_temperature": 1.0, "latency_ms": 1.0}
+        for qid, q in record["questions"].items():
+            keys = question_keys(q["type"], q.get("criteria"))
+            z = {k: (content.get(k, 0.0) + position[i] if q["type"] == "choice" else float(i)) for i, k in enumerate(keys)}
+            s = sum(math.exp(v) for v in z.values())
+            out["logits"][qid] = z; out["probabilities"][qid] = {k: math.exp(v) / s for k, v in z.items()}
+        return out
+
+    record = {"state": "s", "questions": {"c": {"type": "choice", "criteria": {"a": None, "b": None, "c": None}}, "n": {"type": "noul"}}}
+    shifted = RotationAveraged.rotated(record, 1)
+    assert list(shifted["questions"]["c"]["criteria"]) == ["b", "c", "a"] and shifted["questions"]["n"] == record["questions"]["n"]
+    avg = RotationAveraged(biased, 3)
+    one, other = avg(record), avg(shifted)
+    assert one["rotations"] == 3 and one["latency_ms"] == 3.0
+    for k in "abc":                                                               # order no longer matters after a full cycle
+        assert one["probabilities"]["c"][k] == pytest.approx(other["probabilities"]["c"][k])
+    z = one["logits"]["c"]; assert z["a"] - z["b"] == pytest.approx(1.0) and z["b"] - z["c"] == pytest.approx(1.0)   # the bias is a constant
+    assert one["probabilities"]["n"] == pytest.approx(biased(record)["probabilities"]["n"])   # noul untouched
+    with pytest.raises(ValueError):
+        RotationAveraged(biased, 1)
