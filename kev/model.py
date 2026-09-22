@@ -8,6 +8,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 # Reuse existing rarely-used Qwen special tokens as delimiters (state, q, opt, /opt, decide) so no
 # embedding rows need to be added/trained; LoRA adapts their meaning.
 SPECIAL = ["<|fim_prefix|>", "<|fim_middle|>", "<|box_start|>", "<|box_end|>", "<|fim_suffix|>"]
+# Gemma 4 has no such tokens to borrow. Its first reserved tokens carry distinct pretrained embeddings (pairwise cosine
+# <= 0.35 on gemma-4-26B-A4B), unlike the high reserved range (<unused89>...), which sits on <unk> (cosine 0.99). They are
+# not added tokens, so caller text cannot produce them.
+GEMMA_SPECIAL = ["<unused0>", "<unused1>", "<unused2>", "<unused3>", "<unused4>"]
 # training context: state tokens, tokens per question branch, and the whole packed record. Frozen suites are admitted with
 # this rule (kev.suite) and training applies it to records built on the fly, so train and eval see the same population.
 MAX_STATE, MAX_BRANCH, MAX_PACKED = 384, 1024, 2048
@@ -52,6 +56,39 @@ def pad_id(tok):
     return tok.pad_token_id if tok.pad_token_id is not None else 0
 
 
+def family(tok):
+    """What encode() needs from a tokenizer, computed once per tokenizer: `delims` (the five delimiter ids: state, q, opt,
+    /opt, decide), `bos` (the ids the tokenizer puts before plain text: [] for Qwen, [<bos>] for Gemma, which expects it
+    as token 0) and `escape` (None for Qwen, whose control tokens are all `<|name|>`; otherwise a pattern over the added
+    special tokens, so caller text cannot produce <bos>, <|turn> or <|image|>)."""
+    fam = getattr(tok, "_kev_family", None)
+    if fam is None:
+        unk = getattr(tok, "unk_token_id", None)   # what a tokenizer returns for a token it does not have (Qwen: None)
+        found = ((n, [tok.convert_tokens_to_ids(t) for t in n]) for n in (SPECIAL, GEMMA_SPECIAL))
+        names, delims = next(((n, ids) for n, ids in found if all(i is not None and i != unk for i in ids)), (None, None))
+        if names is None: raise ValueError(f"{type(tok).__name__} has none of Kev's delimiter token sets")
+        plain, full = tok("a", add_special_tokens=False).input_ids, tok("a").input_ids
+        escape = None
+        if names is not SPECIAL:
+            added = sorted({t.content for t in tok.added_tokens_decoder.values() if t.special}, key=len, reverse=True)
+            escape = re.compile("|".join(map(re.escape, added)))
+        fam = tok._kev_family = {"delims": delims, "bos": full[: len(full) - len(plain)] if full[-len(plain):] == plain else [], "escape": escape}
+    return fam
+
+
+def text_backbone(lm):
+    """The decoder stack of a loaded *ForCausalLM: `.model`. Multimodal checkpoints (Gemma 4 loads as
+    Gemma4ForConditionalGeneration) nest it one level deeper as `.language_model`; the vision and audio towers are dropped."""
+    m = lm.model
+    return getattr(m, "language_model", m)
+
+
+def sliding_window(config):
+    """The window of the local attention layers (Gemma 4: 1,024), or None when every layer is global. The packed mask
+    applies it by position (kev.model.branch_mask_batch); caches are kept full length so the state prefix can be cropped."""
+    return getattr(config, "sliding_window", None) if "sliding_attention" in set(getattr(config, "layer_types", None) or []) else None
+
+
 def is_hybrid(config):
     """Whether a (text) config has Gated DeltaNet layers (Qwen3.5). Such backbones cannot honour the block-causal mask and
     run the row form; on Apple Silicon they are what the MLX backend is for."""
@@ -64,7 +101,9 @@ _SPECIAL_RE = re.compile(r"<\|([A-Za-z0-9_]+)\|>")
 def user_tokens(tok, text):
     """Tokenize caller-supplied text so it can never produce delimiter/control tokens (option boundaries are unforgeable).
     The fast tokenizer ignores split_special_tokens, so `<|name|>` is rewritten to `<¦name¦>` before tokenizing."""
-    return tok(_SPECIAL_RE.sub(r"<¦\1¦>", text), add_special_tokens=False).input_ids
+    text = _SPECIAL_RE.sub(r"<¦\1¦>", text)
+    if (escape := family(tok)["escape"]) is not None: text = escape.sub(lambda m: "<¦" + m.group(0)[1:], text)
+    return tok(text, add_special_tokens=False).input_ids
 
 
 OPT_NONE, OPT_DECIDE = -1, -2   # values of enc["opt"]: instruction/state tokens, and the <decide> token
@@ -81,12 +120,13 @@ def encode(tok, rec, max_state=MAX_STATE, max_branch=MAX_BRANCH, strict=False, o
     option spans share the same position ids, and <decide> sits at one fixed position after the longest span. Then the
     per-option representations and <decide>'s attention over them are permutation-invariant by construction.
     """
+    fam = family(tok); head = fam["bos"] + fam["delims"][:1]          # [<bos>] <state>: the state's fixed tokens
     state_tokens = user_tokens(tok, rec["state"])
-    if strict and len(state_tokens) + 1 > max_state:
-        raise ContextOverflow(f"state exceeds {max_state} tokens: {len(state_tokens) + 1}")
-    S = [tok.convert_tokens_to_ids(SPECIAL[0])] + state_tokens[: max_state - 1]
+    if strict and len(state_tokens) + len(head) > max_state:
+        raise ContextOverflow(f"state exceeds {max_state} tokens: {len(state_tokens) + len(head)}")
+    S = head + state_tokens[: max_state - len(head)]
     ids, seg, pos, opt = list(S), [0] * len(S), list(range(len(S))), [OPT_NONE] * len(S)
-    q_id, o_id, c_id, d_id = (tok.convert_tokens_to_ids(t) for t in SPECIAL[1:])
+    q_id, o_id, c_id, d_id = fam["delims"][1:]
     decide_idx, opt_idx = [], []
     for k, q in enumerate(rec["questions"], start=1):
         instr = [q_id] + user_tokens(tok, q["instr"])
@@ -107,7 +147,7 @@ def encode(tok, rec, max_state=MAX_STATE, max_branch=MAX_BRANCH, strict=False, o
         ids += br; seg += [k] * len(br); pos += br_pos; opt += br_opt
         decide_idx.append(base + len(br) - 1); opt_idx.append([base + e for e in ends])
     return {"ids": ids, "seg": seg, "pos": pos, "opt": opt, "option_isolation": option_isolation, "decide_idx": decide_idx, "opt_idx": opt_idx,
-            "labels": [q["label"] for q in rec["questions"]], "state_truncated": len(state_tokens) + 1 > max_state}
+            "labels": [q["label"] for q in rec["questions"]], "state_truncated": len(state_tokens) + len(head) > max_state}
 
 
 def fits(rec, *tokenizers, max_state=MAX_STATE, max_branch=MAX_BRANCH, max_packed=MAX_PACKED):
@@ -124,7 +164,7 @@ def branch_mask(seg, device, dtype=torch.float32):
     return branch_mask_batch([seg], device, dtype)
 
 
-def branch_mask_batch(segs, device, dtype=torch.float32, opts=None, length=None):
+def branch_mask_batch(segs, device, dtype=torch.float32, opts=None, length=None, pos=None, window=None):
     """Batched block-causal mask, additive [B,1,L,L], right-padded to the longest sequence.
 
     Padded key positions are masked for every query; padded query rows keep the diagonal so no row is fully
@@ -132,7 +172,10 @@ def branch_mask_batch(segs, device, dtype=torch.float32, opts=None, length=None)
     after them (causal) and belong to no segment (-1).
 
     opts (option isolation): within a question, an option-span token may attend to state, the instruction, and its own
-    span only; <decide> attends to everything in its question. Instruction tokens never see option spans (causal)."""
+    span only; <decide> attends to everything in its question. Instruction tokens never see option spans (causal).
+
+    window (sliding-window layers, with `pos`, the position ids): a query also drops keys `window` or more positions
+    behind it. Distance is by position, not index, so a branch sees the same state tokens as its causal row does."""
     L = max(max(len(s) for s in segs), length or 0)
     s = torch.full((len(segs), L), -1, device=device)
     for b, seg in enumerate(segs):
@@ -149,6 +192,11 @@ def branch_mask_batch(segs, device, dtype=torch.float32, opts=None, length=None)
         query_is_decide = (o[:, :, None] == OPT_DECIDE)
         same_option = o[:, None, :] == o[:, :, None]
         allow = allow & (~key_is_option | query_is_decide | same_option)
+    if window is not None:
+        p = torch.zeros((len(segs), L), dtype=torch.long, device=device)
+        for b, ps in enumerate(pos):
+            p[b, : len(ps)] = torch.tensor(ps, device=device)
+        allow = allow & ((p[:, :, None] - p[:, None, :]) < window)
     allow = allow | torch.eye(L, dtype=torch.bool, device=device)[None]
     return torch.zeros(len(segs), L, L, dtype=dtype, device=device).masked_fill(~allow, torch.finfo(dtype).min)[:, None]
 
@@ -199,7 +247,7 @@ class DecisionModel(nn.Module):
         # eager on MPS/CPU (known-good with our float 4D mask); SDPA on CUDA (accepts arbitrary additive masks).
         attn = attn or ("sdpa" if str(device).startswith("cuda") else "eager")
         # dtype: fp32 for training and exact evaluation; bf16 is a serving option for large backbones (8B on a 32 GB Mac)
-        self.lm = AutoModelForCausalLM.from_pretrained(name, revision=revision, dtype=dtype, attn_implementation=attn).model
+        self.lm = text_backbone(AutoModelForCausalLM.from_pretrained(name, revision=revision, dtype=dtype, attn_implementation=attn))
         self.pad_id = pad_id(tok)
         # hybrid backbones (Qwen3.5: Gated DeltaNet layers, recurrent) cannot honour the block-causal mask, so every
         # question runs as its own causal row continuing from the state (rows_of). Attention-only backbones keep the
@@ -207,15 +255,19 @@ class DecisionModel(nn.Module):
         self.hybrid = is_hybrid(self.lm.config)
         if self.hybrid and option_isolation: raise ValueError("option_isolation needs the packed mask; not available on hybrid backbones")
         self.option_isolation = option_isolation
+        # attention-only backbones with local layers (Gemma 4) keep the packed form; the mask gets a per-layer-type variant
+        self.window = sliding_window(self.lm.config)
         if lora:
             from peft import LoraConfig, get_peft_model
-            extra = {"trainable_token_indices": {"embed_tokens": [tok.convert_tokens_to_ids(t) for t in SPECIAL]}} if special_embeddings else {}
+            extra = {"trainable_token_indices": {"embed_tokens": family(tok)["delims"]}} if special_embeddings else {}
             targets = {"all": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
                        "dense": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],   # "all" minus the DeltaNet projections on hybrids (retention ablation)
                        "attn": ["q_proj", "k_proj", "v_proj", "o_proj"], "qv": ["q_proj", "v_proj"]}[lora_targets]
             if self.hybrid and lora_targets in ("all", "attn"):
                 # Gated DeltaNet projections (transformers 5 names, verified on Qwen3_5TextModel); the mixer's out_proj too
                 targets = targets + ["in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj"]
+            # MoE backbones: routed experts are fused 3D parameters (Gemma 4, Qwen3.5-MoE), which these names do not reach;
+            # the adapter covers attention and the dense MLP that runs beside the experts (Gemma 4's `mlp`)
             cfg = LoraConfig(task_type="FEATURE_EXTRACTION", r=lora, lora_alpha=2 * lora, lora_dropout=0.05, target_modules=targets, **extra)
             self.lm = get_peft_model(self.lm, cfg)
         self.head = PointerHead(self.lm.config.hidden_size, dp=head_dim)
@@ -263,9 +315,26 @@ class DecisionModel(nn.Module):
         isolate = any(e.get("option_isolation") for e in encs)
         if isolate and not all(e.get("option_isolation") for e in encs):
             raise ValueError("cannot mix option-isolated and plain encodings in one batch")
-        lm_dtype = next(self.lm.parameters()).dtype
-        mask = branch_mask_batch([e["seg"] for e in encs], self.device, dtype=lm_dtype, opts=[e["opt"] for e in encs] if isolate else None, length=ids.shape[1])
+        mask = self._mask(encs, length=ids.shape[1])
         return self.lm(input_ids=ids, position_ids=pos, attention_mask=mask).last_hidden_state.float()   # head stays fp32
+
+    def _mask(self, encs, length=None, queries_from=0):
+        """The packed block-causal mask for these records in the backbone's dtype, keeping query rows from `queries_from` on
+        (the branches, when the state is cached). Backbones with sliding-window layers get the per-layer-type dict
+        transformers accepts in place of one mask: the same mask for global layers, the window applied for local ones."""
+        dt = next(self.lm.parameters()).dtype
+        opts = [e["opt"] for e in encs] if any(e.get("option_isolation") for e in encs) else None
+        segs, pos = [e["seg"] for e in encs], [e["pos"] for e in encs]
+        full = branch_mask_batch(segs, self.device, dtype=dt, opts=opts, length=length)[:, :, queries_from:, :]
+        if self.window is None: return full
+        local = branch_mask_batch(segs, self.device, dtype=dt, opts=opts, length=length, pos=pos, window=self.window)[:, :, queries_from:, :]
+        return {"full_attention": full, "sliding_attention": local}
+
+    def _new_cache(self):
+        """An empty cache for a prefix pass. Hybrid layers need the config (recurrent + conv state per DeltaNet layer).
+        Sliding-window layers must not get it: a window-sized cache layer cannot be cropped back to the state once it
+        is full, so they keep full-length keys and the mask applies the window."""
+        return DynamicCache() if self.window is not None else DynamicCache(config=self.lm.config)
 
     def _readout(self, h, enc):
         return [self.head(h[d], h[torch.tensor(oi, device=self.device)]) for d, oi in zip(enc["decide_idx"], enc["opt_idx"])]
@@ -340,7 +409,7 @@ class DecisionModel(nn.Module):
         Ls = enc["seg"].count(0)
         ids = torch.tensor([enc["ids"][:Ls]], device=self.device); pos = torch.tensor([enc["pos"][:Ls]], device=self.device)
         # the cache must know the layer types (hybrid backbones keep recurrent + conv states per DeltaNet layer)
-        out = self.lm(input_ids=ids, position_ids=pos, past_key_values=DynamicCache(config=self.lm.config), use_cache=True)
+        out = self.lm(input_ids=ids, position_ids=pos, past_key_values=self._new_cache(), use_cache=True)
         return Ls, out.past_key_values, out.last_hidden_state[0].float()
 
     @torch.no_grad()
@@ -354,9 +423,7 @@ class DecisionModel(nn.Module):
             Ls, cache, h_state = self.prefix(enc)
             return self._branch_rows_from_prefix(enc, cache), (Ls, cache, h_state)
         ids = torch.tensor([enc["ids"]], device=self.device); pos = torch.tensor([enc["pos"]], device=self.device)
-        dt = next(self.lm.parameters()).dtype
-        mask = branch_mask_batch([enc["seg"]], self.device, dtype=dt, opts=[enc["opt"]] if enc.get("option_isolation") else None)
-        out = self.lm(input_ids=ids, position_ids=pos, attention_mask=mask, past_key_values=DynamicCache(config=self.lm.config), use_cache=True)
+        out = self.lm(input_ids=ids, position_ids=pos, attention_mask=self._mask([enc]), past_key_values=self._new_cache(), use_cache=True)
         h = out.last_hidden_state[0].float()
         out.past_key_values.crop(-(len(enc["ids"]) - Ls))     # keep the state only (negative = drop that many trailing tokens; positive form deprecated in transformers 5)
         return [F.softmax(z, -1).cpu() for z in self._readout(h, enc)], (Ls, out.past_key_values, h[:Ls].clone())
@@ -370,8 +437,7 @@ class DecisionModel(nn.Module):
         if self.rows_form([enc]):
             return self._branch_rows_from_prefix(enc, cache)
         ids = torch.tensor([enc["ids"][Ls:]], device=self.device); pos = torch.tensor([enc["pos"][Ls:]], device=self.device)
-        dt = next(self.lm.parameters()).dtype
-        mask = branch_mask_batch([enc["seg"]], self.device, dtype=dt, opts=[enc["opt"]] if enc.get("option_isolation") else None)[:, :, Ls:, :]
+        mask = self._mask([enc], queries_from=Ls)
         try:
             out = self.lm(input_ids=ids, position_ids=pos, past_key_values=cache, attention_mask=mask, use_cache=True)
             h = torch.cat([h_state, out.last_hidden_state[0].float()], 0)

@@ -1,0 +1,28 @@
+[
+ {
+  "epochs": 2,
+  "batch": 2,
+  "accum": 4,
+  "dtype": "bf16",
+  "checkpointing": 1,
+  "p_none_pair": 0.25,
+  "base": "google/gemma-4-26B-A4B",
+  "base_revision": "24548b62aa021d562695c04aaf7758a1ea47990b",
+  "seed": 0,
+  "lr": 5e-05,
+  "weights_dtype": "bf16"
+ },
+ {
+  "epochs": 2,
+  "batch": 2,
+  "accum": 4,
+  "dtype": "bf16",
+  "checkpointing": 1,
+  "p_none_pair": 0.25,
+  "base": "google/gemma-4-26B-A4B",
+  "base_revision": "24548b62aa021d562695c04aaf7758a1ea47990b",
+  "seed": 0,
+  "lr": 2e-05,
+  "weights_dtype": "bf16"
+ }
+]

@@ -37,7 +37,9 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(a.base, dtype=dtype, revision=a.revision).to(a.device).eval()
     if a.adapter:
         from peft import PeftModel
-        model.model = PeftModel.from_pretrained(model.model, a.adapter).merge_and_unload()   # Kev adapters are trained on the bare backbone (.model)
+        # Kev adapters are trained on the bare backbone (kev.model.text_backbone: .model, or .model.language_model for Gemma 4)
+        owner, attr = (model.model, "language_model") if hasattr(model.model, "language_model") else (model, "model")
+        setattr(owner, attr, PeftModel.from_pretrained(getattr(owner, attr), a.adapter).merge_and_unload())
         model.eval()
     letters = "ABCDEFGHIJKLMNOP"
     letter_ids = [tok.encode((" " if a.prompt == "plain" else "") + L, add_special_tokens=False)[0] for L in letters]
