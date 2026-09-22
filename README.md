@@ -1,4 +1,46 @@
-# Kev
+# Rev
+
+Rev is RooCodeInc's fork of [Kev](https://github.com/jaredpalmer/kev): the same small decision models (pointer head, isolated
+questions, frozen eval suites), moved onto an open base with more knowledge than Qwen3.5. The first target is
+[Gemma 4 26B-A4B](https://huggingface.co/google/gemma-4-26B-A4B) (Apache-2.0): a mixture of experts with the knowledge of a
+26B model at about 4B active parameters per token.
+
+**Status: port only, no trained weights yet.** Everything below the line is Kev's upstream documentation, and its numbers
+are Kev's (Qwen3.5), not Rev's.
+
+What the port changes, and why:
+
+- **Attention-only again.** Qwen3.5's recurrent layers ignore attention masks, so Kev runs every question as its own row.
+  Gemma 4 is all attention, so questions go back to one packed pass under the block-causal mask. Its sliding-window layers
+  get their own variant of that mask, applied by position so a question sees the same state tokens in either form.
+- **Delimiters.** Gemma has no rarely used real tokens to borrow, so Rev uses `<unused0>`–`<unused4>`, the reserved tokens
+  whose pretrained embeddings are distinct (the higher reserved range sits on `<unk>`). The state starts with `<bos>`,
+  which Gemma expects, and caller text is escaped so it cannot produce Gemma control tokens.
+- **LoRA reaches attention and the dense MLP.** The 128 routed experts are fused 3D tensors and stay frozen, as with
+  Kev's Qwen3.6-35B-A3B trial.
+- **Qwen checkpoints are unaffected.** Encodings under the Qwen3.5 and Qwen2.5 tokenizers are byte-identical to upstream.
+
+The code keeps upstream's `kev` package name and `KEV_*` variables so upstream fixes merge cleanly.
+
+```bash
+uv sync --extra serve
+uv run --extra serve python -m pytest tests/test_gemma4.py -q      # tiny random-weight Gemma 4, real tokenizer; no weight download
+```
+
+Next steps run on Modal (the weights are about 52 GB in bf16, so training needs an 80 GB GPU; a Mac needs a 4-bit MLX
+build, which is not written yet):
+
+```bash
+uv run modal run modal_app.py::smoke_base --base google/gemma-4-26B-A4B --revision 24548b62aa021d562695c04aaf7758a1ea47990b --gpu H100
+uv run modal run modal_app.py::base_probe --bases google/gemma-4-26B-A4B --revision 24548b62aa021d562695c04aaf7758a1ea47990b --suite evals/v9/transfer-v9
+uv run modal run modal_app.py::study --suite evals/v7/decision-v7 --plan experiments/gemma4-26b.json --name gemma4-26b
+```
+
+Kev is by Jared Palmer and is licensed Apache-2.0; Rev keeps that license and its notices.
+
+---
+
+## Kev (upstream)
 
 Small Jev-like decision models you can train and run yourself.
 

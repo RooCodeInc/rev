@@ -26,7 +26,7 @@ from typing import NamedTuple
 
 import modal
 
-APP_NAME = os.environ.get("KEV_APP_NAME", "kev-research")
+APP_NAME = os.environ.get("KEV_APP_NAME", "rev-research")
 TRIAL_CPU, TRIAL_MEMORY = 4, (65536, 196608)
 GPU_HOURLY = {"H100": 3.95, "H200": 4.54, "B200": 6.25, "T4": 0.59}
 
