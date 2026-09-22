@@ -14,10 +14,10 @@ from pathlib import Path
 
 import torch
 from transformers import AutoModelForCausalLM
-from .model import load_tokenizer
 
 from kev.api import question_keys
 from kev.device import default_device
+from kev.model import load_tokenizer
 from kev.suite import load_split, write_json
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"

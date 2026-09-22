@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import torch
 from dataclasses import dataclass, field, replace
 from fastapi import FastAPI, HTTPException
+from transformers import PreTrainedTokenizerBase
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -21,7 +22,6 @@ from .api import SystemOneRequest, to_record, to_answers, output_tokens, with_da
 from .checkpoint import Checkpoint, LoadOptions, is_hub_id
 from .device import default_device, sync
 from .model import SERVE_MAX_BRANCH, SERVE_MAX_STATE, DecisionModel
-from transformers import PreTrainedTokenizerBase
 
 if TYPE_CHECKING:
     from .mlx_model import MLXDecisionModel
