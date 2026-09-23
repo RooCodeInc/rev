@@ -61,7 +61,7 @@ def load_video(raw, frames=VIDEO_FRAMES):
     return np.stack([decoded[i] for i in keep]), {"fps": fps, "total_num_frames": len(keep)}
 
 
-@functools.lru_cache(maxsize=4096)
+@functools.lru_cache(maxsize=256)   # decoded media are large (a 768px image ~1.7 MB); 4096 filled swap on a 48 GB Mac
 def _load_path(kind, path):
     return _decode(kind, Path(path).read_bytes())
 
