@@ -11,9 +11,11 @@ cannot make: the answer is in the picture or in the voice.
     crema        an actor saying one of 12 neutral sentences in an emotion: which emotion, and a yes/no on one (CREMA-D; the
                  words carry no emotion, only the voice does; clips where the acted and the crowd-perceived emotion agree;
                  actors 1076-1091 held out for test)
+    spoken       a Banking77 message read aloud by a macOS voice (`say`, 16 kHz WAV) as a voicemail: which of 77 intents.
+                 Test voices are never used in training. macOS only (it is how the files are made, not how they are read).
 
-Run: uv run --extra media python scripts/build_mm_v0.py --out data/mm-v0 [--n_train 1000 --n_test 300]
-Writes <out>/{train,test}.jsonl (kev.data.load_records format plus "media") and <out>/media/<source>/...
+Run: uv run --extra media python scripts/build_mm_v0.py --out data/mm-v0 [--n_train 1000 --n_test 300] [--only spoken --tag spoken]
+Writes <out>/{train,test}[-<tag>].jsonl (kev.data.load_records format plus "media") and <out>/media/<source>/...
 """
 import argparse, hashlib, io, json, random
 from pathlib import Path
@@ -192,13 +194,51 @@ def crema(out, split, n, rng):
     return recs
 
 
-SOURCES = {"aokvqa": aokvqa, "pets": pets, "screenshot": screenshot, "minds14": minds14, "crema": crema}
+TRAIN_VOICES = ["Aman", "Daniel", "Eddy (English (UK))", "Eddy (English (US))", "Flo (English (UK))", "Flo (English (US))", "Fred",
+                "Grandma (English (UK))", "Grandma (English (US))", "Grandpa (English (US))", "Junior", "Karen", "Kathy", "Ralph",
+                "Reed (English (US))", "Rocko (English (UK))", "Rocko (English (US))", "Samantha", "Sandy (English (UK))",
+                "Sandy (English (US))", "Shelley (English (US))", "Tara"]
+TEST_VOICES = ["Moira", "Tessa", "Rishi", "Grandpa (English (UK))", "Shelley (English (UK))", "Reed (English (UK))"]
+
+
+def speak(text, voice, rate, path):
+    import subprocess, tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(suffix=".aiff") as tmp:
+        subprocess.run(["say", "-v", voice, "-r", str(rate), "-o", tmp.name, text], check=True)
+        subprocess.run(["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", tmp.name, str(path)], check=True)
+
+
+def spoken(out, split, n, rng):
+    from concurrent.futures import ThreadPoolExecutor
+    sha, rs = rows(REPOS["banking77"], f"data/{split}-")
+    names = json.loads(pq.read_schema(files(REPOS["banking77"], f"data/{split}-")[1][0]).metadata[b"huggingface"])["info"]["features"]["label"]["names"]
+    voices = TRAIN_VOICES if split == "train" else TEST_VOICES
+    jobs, recs = [], []
+    for i in rng.sample(range(len(rs)), min(n, len(rs))):
+        ex = rs[i]; voice = rng.choice(voices); rate = rng.randint(150, 220)
+        text = rng.choice(["{}", "Hi, {}", "Hello, this is a message for the bank. {} Thanks.", "{} Please call me back."]).format(ex["text"])
+        rel = f"media/spoken/{split}/{i}.wav"; jobs.append((text, voice, rate, out / rel))
+        t = rng.choice(["Customer asks about {}", "Issue concerning {}", "Request related to {}", "{}"])
+        crit = {k: (t.format(k.replace("_", " ")) if rng.random() < 0.5 else None) for k in names}
+        recs.append({"state": rng.choice(["", "Voicemail left on the support line.", {"channel": "phone", "attachment": "voicemail"}]),
+                     "media": [{"type": "audio", "path": rel}], "questions": {
+            "intent": {"type": "choice", "instructions": instr("Which banking intent best describes the caller's voicemail?", rng),
+                       "criteria": crit, "label": names[ex["label"]], "src": "spoken"}},
+            "_meta": {**meta("spoken", split, i, REPOS["banking77"], sha, i), "voice": voice, "rate": rate}})
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(lambda j: speak(*j), [j for j in jobs if not j[3].exists()]))
+    return recs
+
+
+SOURCES = {"aokvqa": aokvqa, "pets": pets, "screenshot": screenshot, "minds14": minds14, "crema": crema, "spoken": spoken}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="data/mm-v0"); ap.add_argument("--n_train", type=int, default=1000); ap.add_argument("--n_test", type=int, default=300)
     ap.add_argument("--seed", type=int, default=0); ap.add_argument("--only", default="")
+    ap.add_argument("--tag", default="", help="suffix for the JSONL names, e.g. a single-source build next to an existing set")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     for split, n in (("train", a.n_train), ("test", a.n_test)):
@@ -208,9 +248,9 @@ def main():
             got = fn(out, split, n, random.Random(seed_of(a.seed, name, split)))
             print(f"{split} {name}: {len(got)}", flush=True); recs += got
         random.Random(seed_of(a.seed, split)).shuffle(recs)
-        with open(out / f"{split}.jsonl", "w", encoding="utf-8") as f:
+        with open(out / f"{split}{'-' + a.tag if a.tag else ''}.jsonl", "w", encoding="utf-8") as f:
             for r in recs: f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    print(f"wrote {out}/train.jsonl, {out}/test.jsonl")
+    print(f"wrote {out}/{{train,test}}{'-' + a.tag if a.tag else ''}.jsonl")
 
 
 if __name__ == "__main__":

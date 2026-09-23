@@ -322,7 +322,7 @@ def augment(req, rng, p_none=0.1, p_none_distract=0.12, p_distract=0.15):
     answer (true option removed) or as a wrong alternative (true option kept); sometimes add an irrelevant distractor."""
     if min(p_none, p_none_distract, p_distract) < 0 or p_none + p_none_distract + p_distract > 1:
         raise ValueError("augmentation probabilities must be nonnegative and sum to at most one")
-    out = {"state": req["state"], "questions": {}}
+    out = {**{k: v for k, v in req.items() if k != "questions"}, "questions": {}}   # keeps state, media, _meta
     for qid, q in req["questions"].items():
         if q["type"] != "choice":
             out["questions"][qid] = q; continue
@@ -356,7 +356,8 @@ def none_pair(req, rng):
     keys = list(q["criteria"]) + [nk]; rng.shuffle(keys)
     present = {**q, "criteria": {k: (nd if k == nk else q["criteria"][k]) for k in keys}}
     absent = {**present, "criteria": {k: v for k, v in present["criteria"].items() if k != q["label"]}, "label": nk}
-    return [{"state": req["state"], "questions": {qid: present}}, {"state": req["state"], "questions": {qid: absent}}]
+    rest = {k: v for k, v in req.items() if k != "questions"}                       # state, media, _meta
+    return [{**rest, "questions": {qid: present}}, {**rest, "questions": {qid: absent}}]
 
 
 def load_records(path, source="custom"):

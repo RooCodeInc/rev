@@ -24,7 +24,7 @@ from .model import MAX_STATE, MAX_TRAIN_STATE, DecisionModel, fits, load_tokeniz
 
 def permuted_copy(rec, rng):
     """Re-shuffle options of every Choice question with K>=3; return (record, perms) with perms[q] = new->old index or None."""
-    out, perms = {"state": rec["state"], "questions": []}, []
+    out, perms = {**{k: v for k, v in rec.items() if k != "questions"}, "questions": []}, []   # keeps state and media
     for q in rec["questions"]:
         if q["qtype"] == "choice" and len(q["options"]) >= 3:
             perm = list(range(len(q["options"]))); rng.shuffle(perm)

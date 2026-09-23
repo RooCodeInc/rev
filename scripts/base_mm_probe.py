@@ -12,6 +12,7 @@ import torch
 
 from kev.data import load_records, materialize
 from kev.media import load
+from kev.suite import write_json
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -45,8 +46,9 @@ def main():
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     (out / "rows.json").write_text(json.dumps(rows), encoding="utf-8")
     acc = sum(max(range(len(x["p"])), key=x["p"].__getitem__) == x["label"] for x in rows) / max(len(rows), 1)
-    (out / "report.json").write_text(json.dumps({"base": a.base, "revision": a.revision, "data": a.data, "readout": "zero-shot next-token letter logits",
-                                                 "questions": len(rows), "skipped_over_max_options": skipped, "accuracy": acc}, indent=1), encoding="utf-8")
+    report = {"base": a.base, "revision": a.revision, "data": a.data, "readout": "zero-shot next-token letter logits",
+              "questions": len(rows), "skipped_over_max_options": skipped, "accuracy": acc}
+    write_json(out / "report.json", report)
     print(f"{len(rows)} questions ({skipped} skipped: more than {a.max_options} options), accuracy {acc:.3f}")
 
 

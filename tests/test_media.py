@@ -60,8 +60,8 @@ def test_api_media_field_and_records(tmp_path):
     for bad in ({"type": "image"}, {"type": "image", "data": "x", "url": "http://e"}, {"type": "gif", "data": "x"}):
         with pytest.raises(ValueError): SystemOneRequest.model_validate({"state": "s", "questions": q, "media": [bad]})
     (tmp_path / "m").mkdir(); (tmp_path / "m" / "x.png").write_bytes(png_bytes())
-    (tmp_path / "d.jsonl").write_text(json.dumps({"state": "", "media": [{"type": "image", "path": "m/x.png"}],
-                                                  "questions": {"red": {"type": "noul", "instructions": "Red?", "label": True}}}) + "\n", encoding="utf-8")
+    line = json.dumps({"state": "", "media": [{"type": "image", "path": "m/x.png"}], "questions": {"red": {"type": "noul", "instructions": "Red?", "label": True}}})
+    (tmp_path / "d.jsonl").write_text(line + "\n", encoding="utf-8")
     r = load_records(tmp_path / "d.jsonl")[0]
     assert r["media"][0]["path"] == str((tmp_path / "m" / "x.png").resolve())   # relative to the JSONL file
     assert materialize(r)["media"] == r["media"]
@@ -77,3 +77,19 @@ def test_server_refuses_local_paths_and_urls():
         with pytest.raises(HTTPException): prepare(SystemOneRequest.model_validate({"state": "s", "questions": q, "media": [m]}))
     ok = prepare(SystemOneRequest.model_validate({"state": "s", "questions": q, "media": [{"type": "image", "data": "eA=="}]}))
     assert ok.media[0].data == "eA=="
+
+
+def test_training_augmentation_keeps_media():
+    """augment, none_pair and the permutation copy rebuild each record every epoch; they once kept only state and
+    questions, so every record trained without its media (images still scored well zero-shot; audio stayed at chance)."""
+    import random
+    from kev.data import augment, materialize, none_pair
+    from kev.train import permuted_copy
+    media = [{"type": "audio", "path": "/x.wav"}]
+    req = {"state": "", "media": media, "_meta": {"id": "a"}, "questions": {"intent": {
+        "type": "choice", "instructions": "What?", "criteria": {"a": None, "b": None, "c": None, "d": None}, "label": "a", "src": "t"}}}
+    rng = random.Random(0)
+    assert augment(req, rng)["media"] == media and materialize(augment(req, rng))["media"] == media
+    assert all(v["media"] == media for v in none_pair(req, rng))
+    rec = materialize(req); rec["questions"][0]["qtype"] = "choice"
+    assert permuted_copy(rec, rng)[0]["media"] == media
