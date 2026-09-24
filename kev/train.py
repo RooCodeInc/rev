@@ -17,7 +17,7 @@ from .checkpoint import Checkpoint, Meta, write_meta
 from .device import allocated_bytes, default_device, empty_cache
 from .data import EVAL_ONLY, build, augment, load_records, materialize, none_pair, source_seed
 from .suite import SYNTHETIC_SOURCES, digest, load_split, read_json, read_manifest, validate_training, write_json
-from .model import MAX_STATE, MAX_TRAIN_STATE, DecisionModel, fits, load_tokenizer, training_context
+from .model import MAX_STATE, MAX_TRAIN_STATE, ContextOverflow, DecisionModel, fits, load_tokenizer, training_context
 
 
 # --- losses -----------------------------------------------------------------------------------------------------------
@@ -167,7 +167,14 @@ def encode_batch(model, tok, a, chunk, epoch):
             variants += none_pair(req, item_rng)
         for v in variants:
             rec = materialize(v)
-            enc = model.encode(tok, rec, strict=True, **limits)
+            try:
+                enc = model.encode(tok, rec, strict=True, **limits)
+            except ContextOverflow as e:
+                # the record fits un-augmented (the context filter), but an added none/distractor option can push a long
+                # branch past the row limit under another tokenizer (Gemma 4 on a 77-option Banking77 record): skip that
+                # one variant rather than abort the run
+                print(f"skipped an augmented variant of {req['_meta']['id']}: {e}", flush=True)
+                continue
             if len(enc["ids"]) > c["max_packed"]:
                 raise ValueError(f"training request exceeds {c['max_packed']} packed tokens")
             out.append(Variant(rec, enc, req["_meta"]["id"], req["_meta"]["source"]))
@@ -337,11 +344,12 @@ def main():
         for mb in range(micro_per_epoch):
             chunk = reqs[mb * a.batch : (mb + 1) * a.batch]
             batch = encode_batch(model, tok, a, chunk, ep)
-            loss, terms = batch_loss(model, a, batch, dev, anchors, anchor_sources, autocast)
-            # weight by source records in the accumulation group so none-pair siblings do not inflate a record's share
-            group_records = accumulation_records(len(reqs), a.batch, a.accum, mb) * (len(batch) / len(chunk))
-            (loss / group_records).backward()
-            run += terms; run["n"] += len(batch); seen += len(batch); tokens_seen += sum(v.tokens for v in batch)
+            if batch:   # every variant can be skipped (encode_batch); the optimizer step below still runs on schedule
+                loss, terms = batch_loss(model, a, batch, dev, anchors, anchor_sources, autocast)
+                # weight by source records in the accumulation group so none-pair siblings do not inflate a record's share
+                group_records = accumulation_records(len(reqs), a.batch, a.accum, mb) * (len(batch) / len(chunk))
+                (loss / group_records).backward()
+                run += terms; run["n"] += len(batch); seen += len(batch); tokens_seen += sum(v.tokens for v in batch)
             peak_mem = max(peak_mem, allocated_bytes(dev))
             if (mb + 1) % a.accum == 0 or mb + 1 == micro_per_epoch:
                 torch.nn.utils.clip_grad_norm_(model.trainable_parameters(), 1.0)
